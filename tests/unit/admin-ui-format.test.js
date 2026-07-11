@@ -3,6 +3,7 @@ import {
   buildAdminHomeKeyboard,
   buildSysinfoKeyboard,
   buildUserJumpKeyboard,
+  buildUserActionKeyboard,
   formatRankingBlock,
   formatHeatBlock,
   escapeHtml,
