@@ -9,6 +9,7 @@ import { createLogger } from './src/logger.js';
 import { evaluateMessagePolicy } from './src/message-policy.js';
 import { createTelegramClient, TelegramApiError } from './src/telegram-client.js';
 import { createD1Storage } from './src/storage/d1-storage.js';
+import { ensureMigrations } from './src/storage/migrations.js';
 import { createEphemeralStore } from './src/storage/kv-ephemeral-store.js';
 import { createKVStorage } from './src/storage/kv-storage.js';
 import { createUpdateHandler } from './src/update-router.js';
@@ -159,8 +160,13 @@ const CONFIG = {
   SPAM_SILENCE_MODE: false              // 静默丢弃模式（不通知管理员）
 };
 
+/** 网关版本（展示于 /sysinfo） */
+const GATEWAY_VERSION = '1.0.0';
+
 // 线程健康检查缓存，减少频繁探测请求
 const threadHealthCache = new Map();
+// /sysinfo KV 统计短缓存，避免频繁 list
+const sysinfoKvCache = { ts: 0, data: null, ttlMs: 45000 };
 // 同一实例内的并发保护：避免同一用户短时间内重复创建话题
 const topicCreateInFlight = new Map();
 // 管理员权限缓存（实例内）
@@ -253,6 +259,49 @@ async function getBlockedWords(env, forceRefresh = false) {
 
 // 结构化日志系统
 const Logger = createLogger();
+
+// 进程内最近错误环形缓冲（isolate 生命周期内有效；并尽力写入 KV）
+const RECENT_SYSTEM_ERRORS_MAX = 12;
+const recentSystemErrors = [];
+
+function recordSystemError(action, error, data = {}, env = null) {
+  const entry = {
+    ts: Date.now(),
+    action: String(action || 'unknown'),
+    error: error instanceof Error ? error.message : String(error ?? ''),
+    userId: data?.userId != null ? String(data.userId) : undefined,
+  };
+  recentSystemErrors.unshift(entry);
+  if (recentSystemErrors.length > RECENT_SYSTEM_ERRORS_MAX) {
+    recentSystemErrors.length = RECENT_SYSTEM_ERRORS_MAX;
+  }
+  if (env?.TOPIC_MAP) {
+    Promise.resolve()
+      .then(async () => {
+        let list = [];
+        try {
+          const raw = await env.TOPIC_MAP.get('sys:recent_errors');
+          if (raw) list = JSON.parse(raw);
+        } catch { list = []; }
+        if (!Array.isArray(list)) list = [];
+        list.unshift(entry);
+        await env.TOPIC_MAP.put(
+          'sys:recent_errors',
+          JSON.stringify(list.slice(0, RECENT_SYSTEM_ERRORS_MAX)),
+          { expirationTtl: 7 * 24 * 3600 },
+        );
+      })
+      .catch(() => {});
+  }
+}
+
+const _loggerError = Logger.error.bind(Logger);
+Logger.error = (action, error, data = {}) => {
+  try {
+    recordSystemError(action, error, data, data?.env || null);
+  } catch { /* 忽略环形缓冲失败 */ }
+  return _loggerError(action, error, data);
+};
 
 function ephemeralStore(env) {
   return createEphemeralStore(env.TOPIC_MAP);
@@ -398,6 +447,101 @@ async function safeGetJSON(env, key, defaultValue = null) {
   }
 }
 
+/**
+ * 判断 Telegram from 是否缺少可用于话题标题的资料字段。
+ */
+function isSparseTelegramFrom(from) {
+  if (!from || typeof from !== 'object') return true;
+  const hasName = Boolean(String(from.first_name || '').trim() || String(from.last_name || '').trim());
+  const hasUsername = Boolean(String(from.username || '').trim());
+  return !hasName && !hasUsername;
+}
+
+/**
+ * 缓存用户资料，供 Turnstile 验证回放等缺少 from 的路径建话题时使用。
+ */
+async function saveUserProfileSnapshot(env, userId, from) {
+  if (!env?.TOPIC_MAP || !userId || isSparseTelegramFrom(from)) return;
+  try {
+    await env.TOPIC_MAP.put(`profile:${userId}`, JSON.stringify({
+      first_name: from.first_name || null,
+      last_name: from.last_name || null,
+      username: from.username || null,
+      saved_at: Date.now(),
+    }), { expirationTtl: 30 * 24 * 3600 });
+  } catch (e) {
+    Logger.warn('profile_snapshot_save_failed', { userId, error: e?.message });
+  }
+}
+
+/**
+ * 解析建话题用的 from：优先消息 from，其次 KV 快照、D1、Telegram getChat。
+ * 修复 Turnstile 验证通过后 fakeMsg 仅含 id 导致标题变成「User」的问题。
+ */
+async function resolveUserFromForTopic(env, userId, from) {
+  if (!isSparseTelegramFrom(from)) {
+    return {
+      id: Number(from.id ?? userId),
+      first_name: from.first_name || '',
+      last_name: from.last_name || '',
+      username: from.username || '',
+    };
+  }
+
+  try {
+    const raw = await env.TOPIC_MAP?.get(`profile:${userId}`);
+    if (raw) {
+      const snap = JSON.parse(raw);
+      if (!isSparseTelegramFrom(snap)) {
+        return {
+          id: Number(userId),
+          first_name: snap.first_name || '',
+          last_name: snap.last_name || '',
+          username: snap.username || '',
+        };
+      }
+    }
+  } catch { /* 忽略坏快照 */ }
+
+  if (env.TG_BOT_DB) {
+    try {
+      const user = await createD1Storage(env.TG_BOT_DB).getUser(userId);
+      if (user && (user.firstName || user.lastName || user.username)) {
+        return {
+          id: Number(userId),
+          first_name: user.firstName || '',
+          last_name: user.lastName || '',
+          username: user.username || '',
+        };
+      }
+    } catch { /* 忽略 D1 读取失败 */ }
+  }
+
+  try {
+    const res = await tgCall(env, 'getChat', { chat_id: userId });
+    if (res?.ok && res.result) {
+      const chat = res.result;
+      const resolved = {
+        id: Number(userId),
+        first_name: chat.first_name || '',
+        last_name: chat.last_name || '',
+        username: chat.username || '',
+      };
+      if (!isSparseTelegramFrom(resolved)) {
+        await saveUserProfileSnapshot(env, userId, resolved);
+        return resolved;
+      }
+    }
+  } catch { /* 忽略 getChat 失败 */ }
+
+  return {
+    id: Number(from?.id ?? userId),
+    first_name: from?.first_name || '',
+    last_name: from?.last_name || '',
+    username: from?.username || '',
+  };
+}
+
 async function getOrCreateUserTopicRec(from, key, env, userId) {
   const existing = await safeGetJSON(env, key, null);
   if (existing && existing.thread_id) return existing;
@@ -410,18 +554,36 @@ async function getOrCreateUserTopicRec(from, key, env, userId) {
     const again = await safeGetJSON(env, key, null);
     if (again && again.thread_id) return again;
 
+    // 补全资料，避免标题退化为 "User"
+    const resolvedFrom = await resolveUserFromForTopic(env, userId, from);
+    await saveUserProfileSnapshot(env, userId, resolvedFrom);
+
     const storage = createD1Storage(env.TG_BOT_DB);
     let user = await storage.getUser(userId);
     if (!user) {
       user = await storage.ensureUser({
         userId: String(userId),
-        username: from?.username ?? null,
-        firstName: from?.first_name ?? null,
-        lastName: from?.last_name ?? null,
+        username: resolvedFrom?.username || null,
+        firstName: resolvedFrom?.first_name || null,
+        lastName: resolvedFrom?.last_name || null,
       });
+    } else if (
+      isSparseTelegramFrom({
+        first_name: user.firstName,
+        last_name: user.lastName,
+        username: user.username,
+      }) && !isSparseTelegramFrom(resolvedFrom)
+    ) {
+      try {
+        await storage.updateUserState(userId, {
+          username: resolvedFrom.username || null,
+          firstName: resolvedFrom.first_name || null,
+          lastName: resolvedFrom.last_name || null,
+        });
+      } catch { /* 资料回填失败不阻塞建话题 */ }
     }
     if (user?.topicId) {
-      const rec = { thread_id: user.topicId, title: buildTopicTitle(from), closed: false };
+      const rec = { thread_id: user.topicId, title: buildTopicTitle(resolvedFrom), closed: false };
       await env.TOPIC_MAP.put(key, JSON.stringify(rec));
       await env.TOPIC_MAP.put(`thread:${user.topicId}`, String(userId));
       return rec;
@@ -431,7 +593,7 @@ async function getOrCreateUserTopicRec(from, key, env, userId) {
     const acquired = await storage.acquireTopicLock(userId, token, Date.now(), 30000);
     if (acquired) {
       try {
-        const rec = await createTopic(from, key, env, userId);
+        const rec = await createTopic(resolvedFrom, key, env, userId);
         const saved = await storage.setTopic(userId, rec.thread_id, token, Date.now());
         if (!saved) throw new Error("Topic 锁所有权已丢失");
         return rec;
@@ -444,7 +606,7 @@ async function getOrCreateUserTopicRec(from, key, env, userId) {
       await new Promise(resolve => setTimeout(resolve, 150 + attempt * 75));
       const refreshed = await storage.getUser(userId);
       if (refreshed?.topicId) {
-        const rec = { thread_id: refreshed.topicId, title: buildTopicTitle(from), closed: false };
+        const rec = { thread_id: refreshed.topicId, title: buildTopicTitle(resolvedFrom), closed: false };
         await env.TOPIC_MAP.put(key, JSON.stringify(rec));
         await env.TOPIC_MAP.put(`thread:${refreshed.topicId}`, String(userId));
         return rec;
@@ -1103,6 +1265,7 @@ const legacyApp = {
         await env.TOPIC_MAP.delete(`user_challenge:${userId}`);
 
         Logger.info('turnstile_verification_success', { userId });
+        await bumpDailyStat(normalizedEnv, 'verifies', 1);
 
         // 删除验证消息（去掉带按钮的验证卡片）
         const verifyMsgId = await env.TOPIC_MAP.get(`turnstile_msg:${code}`);
@@ -1137,12 +1300,14 @@ const legacyApp = {
               ctx.waitUntil((async () => {
                 let forwardedCount = 0;
                 const limited = pendingIds.slice(0, CONFIG.PENDING_MAX_MESSAGES);
+                // 补全 from：验证页回调没有 Telegram 用户资料，勿用仅含 id 的 from 建话题（会变成 "User"）
+                const topicFrom = await resolveUserFromForTopic(normalizedEnv, userId, null);
                 for (const pendingId of limited) {
                   if (!pendingId) continue;
                   const fakeMsg = {
                     message_id: pendingId,
                     chat: { id: Number(userId), type: "private" },
-                    from: { id: Number(userId) },
+                    from: topicFrom,
                   };
                   try {
                     await forwardToTopic(fakeMsg, userId, `user:${userId}`, normalizedEnv, ctx);
@@ -1208,7 +1373,10 @@ const legacyApp = {
     }
 
     if (update.callback_query) {
-      if (String(update.callback_query.data || '').startsWith('v1:')) {
+      const cbData = String(update.callback_query.data || '');
+      if (cbData.startsWith('adm:')) {
+        await handleAdminUiCallback(update.callback_query, normalizedEnv, ctx);
+      } else if (cbData.startsWith('v1:')) {
         await createLegacyAdminService(normalizedEnv)
           .handleCallbackQuery(update.callback_query);
       } else {
@@ -1229,7 +1397,28 @@ const legacyApp = {
 
     if (msg.chat && msg.chat.type === "private") {
       try {
-        if (msg.text === '/start' || msg.text === '/cancel') {
+        const ptext = removeCommandBotSuffix((msg.text || '').trim());
+        // 用户向简短帮助（非管理员也能看）
+        if (ptext === '/help') {
+          await tgCall(normalizedEnv, 'sendMessage', {
+            chat_id: msg.chat.id,
+            text: [
+              '👋 <b>私聊网关</b>',
+              '',
+              '直接发送文字/图片/文件即可联系管理员。',
+              '首次使用可能需要完成人机验证。',
+              '',
+              '常用：',
+              '• /start — 开始或重新触发验证',
+              '• /help — 显示本说明',
+              '',
+              '管理指令仅在超级群话题内由管理员使用。',
+            ].join('\n'),
+            parse_mode: 'HTML',
+          });
+          return new Response('OK');
+        }
+        if (ptext === '/start' || ptext === '/cancel') {
           const adminResult = await createLegacyAdminService(normalizedEnv)
             .handlePrivateAdminMessage(msg);
           if (adminResult.status === 'menu' || adminResult.status === 'cancelled') {
@@ -1276,6 +1465,9 @@ async function handlePrivateMessage(msg, env, ctx) {
   const userId = msg.chat.id;
   const key = `user:${userId}`;
 
+  // 尽早缓存资料，供验证通过后的消息回放建话题使用
+  await saveUserProfileSnapshot(env, userId, msg.from);
+
   // 速率限制检查
   const rateLimit = await checkRateLimit(userId, env, 'message', CONFIG.RATE_LIMIT_MESSAGE, CONFIG.RATE_LIMIT_WINDOW);
   if (!rateLimit.allowed) {
@@ -1286,13 +1478,14 @@ async function handlePrivateMessage(msg, env, ctx) {
     return;
   }
 
-  // 拦截普通用户发送的指令
+  // 拦截普通用户发送的指令（/help 已在入口处理）
   if (msg.text && msg.text.startsWith("/") && msg.text.trim() !== "/start") {
     return;
   }
 
-  const [isBanned, blockedWords, verification] = await Promise.all([
+  const [isBanned, isMuted, blockedWords, verification] = await Promise.all([
     env.TOPIC_MAP.get(`banned:${userId}`),
+    env.TOPIC_MAP.get(`muted:${userId}`),
     getBlockedWords(env),
     getVerificationState(env, userId),
   ]);
@@ -1314,7 +1507,37 @@ async function handlePrivateMessage(msg, env, ctx) {
     rules: blockedRules,
   });
 
-  if (policyResult.reason === 'banned') return;
+  if (policyResult.reason === 'banned') {
+    // 避免用户不知道已被封禁仍反复发送；每小时最多提醒一次
+    try {
+      const noticeKey = `ban_notice:${userId}`;
+      const noticed = await env.TOPIC_MAP.get(noticeKey);
+      if (!noticed) {
+        await tgCall(env, 'sendMessage', {
+          chat_id: userId,
+          text: '🚫 您已被管理员封禁，暂时无法继续发送消息。如有疑问请等待管理员处理。',
+        });
+        await env.TOPIC_MAP.put(noticeKey, '1', { expirationTtl: 3600 });
+      }
+    } catch (e) {
+      Logger.warn('ban_notice_failed', { userId, error: e?.message });
+    }
+    return;
+  }
+  // 静音：仍接收但不转发到管理群（每小时提示一次）
+  if (isMuted) {
+    try {
+      const noticeKey = `mute_notice:${userId}`;
+      if (!(await env.TOPIC_MAP.get(noticeKey))) {
+        await tgCall(env, 'sendMessage', {
+          chat_id: userId,
+          text: '🔇 您当前处于静音状态，消息不会送达管理员。请等待管理员取消静音。',
+        });
+        await env.TOPIC_MAP.put(noticeKey, '1', { expirationTtl: 3600 });
+      }
+    } catch { /* ignore */ }
+    return;
+  }
   if (policyResult.reason === 'blocked_keyword') {
     const matchedIndex = Number(policyResult.matchedRuleId?.split(':')[1]);
     Logger.info('message_blocked_by_word', { userId, word: blockedWords[matchedIndex] });
@@ -1328,6 +1551,7 @@ async function handlePrivateMessage(msg, env, ctx) {
   // PR #12: 垃圾内容检测（在验证之前检查）
   const spamResult = await spamCheck(msg, userId, env);
   if (spamResult.isSpam) {
+    await bumpDailyStat(env, 'spam', 1);
     await handleSpamMessage(env, userId, msg, spamResult, undefined, ctx);
     return;
   }
@@ -1335,7 +1559,7 @@ async function handlePrivateMessage(msg, env, ctx) {
   if (policyResult.action === 'require_verification') {
     const isStart = msg.text && msg.text.trim() === "/start";
     const pendingMsgId = isStart ? null : msg.message_id;
-    await sendVerificationChallenge(userId, env, pendingMsgId);
+    await sendVerificationChallenge(userId, env, pendingMsgId, msg.from);
     return;
   }
 
@@ -1349,6 +1573,7 @@ async function handlePrivateMessage(msg, env, ctx) {
   }
   if (policyResult.action === 'auto_reply_only') return;
 
+  await bumpDailyStat(env, 'messages_in', 1);
   await forwardToTopic(msg, userId, key, env, ctx);
 }
 
@@ -1360,7 +1585,7 @@ async function forwardToTopic(msg, userId, key, env, ctx) {
   // 并发兜底：如果已被标记为需要重新验证，直接发起验证并暂停转发/建话题
   const needsVerify = await env.TOPIC_MAP.get(`needs_verify:${userId}`);
   if (needsVerify) {
-    await sendVerificationChallenge(userId, env, msg.message_id || null);
+    await sendVerificationChallenge(userId, env, msg.message_id || null, msg.from);
     return;
   }
 
@@ -1386,6 +1611,25 @@ async function forwardToTopic(msg, userId, key, env, ctx) {
     rec = await getOrCreateUserTopicRec(msg.from, key, env, userId);
     if (!rec || !rec.thread_id) {
       throw new Error("创建话题失败");
+    }
+  } else if (!rec.title || rec.title === 'User' || /^User @/i.test(rec.title)) {
+    // 修复 Turnstile 回放建话题时资料缺失导致的占位标题
+    try {
+      const resolvedFrom = await resolveUserFromForTopic(env, userId, msg.from);
+      const title = buildTopicTitle(resolvedFrom);
+      if (title && title !== 'User' && title !== rec.title) {
+        const edit = await tgCall(env, 'editForumTopic', {
+          chat_id: env.SUPERGROUP_ID,
+          message_thread_id: rec.thread_id,
+          name: title,
+        });
+        if (edit?.ok) {
+          rec.title = title;
+          await env.TOPIC_MAP.put(key, JSON.stringify(rec));
+        }
+      }
+    } catch (e) {
+      Logger.warn('topic_title_repair_failed', { userId, error: e?.message });
     }
   }
 
@@ -1629,33 +1873,581 @@ async function handleAdminReply(msg, env, ctx) {
 
 // --- 管理员命令处理函数 ---
 
+function isOwnerUser(env, userId) {
+  return parseIdAllowlist(env.OWNER_IDS).has(String(userId));
+}
+
+function buildUserActionKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [
+      [
+        { text: '🚫 封禁', callback_data: `adm:u:ban:${id}` },
+        { text: '✅ 解封', callback_data: `adm:u:unban:${id}` },
+      ],
+      [
+        { text: '🔒 关闭', callback_data: `adm:u:close:${id}` },
+        { text: '🔓 打开', callback_data: `adm:u:open:${id}` },
+      ],
+      [
+        { text: '🌟 信任', callback_data: `adm:u:trust:${id}` },
+        { text: '🔄 重置验证', callback_data: `adm:u:reset:${id}` },
+      ],
+      [
+        { text: '🔇 静音', callback_data: `adm:u:mute:${id}` },
+        { text: '🔊 取消静音', callback_data: `adm:u:unmute:${id}` },
+      ],
+      [
+        { text: '👤 刷新资料', callback_data: `adm:u:info:${id}` },
+        { text: '🎛 面板', callback_data: `adm:u:panel:${id}` },
+      ],
+    ],
+  };
+}
+
+function buildSysinfoKeyboard(page = 'overview') {
+  const mark = (p, label) => (p === page ? `• ${label}` : label);
+  return {
+    inline_keyboard: [
+      [
+        { text: mark('overview', '概览'), callback_data: 'adm:sys:overview' },
+        { text: mark('storage', '存储'), callback_data: 'adm:sys:storage' },
+        { text: mark('errors', '错误'), callback_data: 'adm:sys:errors' },
+      ],
+      [
+        { text: '🔄 刷新', callback_data: `adm:sys:${page}` },
+        { text: '📊 今日', callback_data: 'adm:sys:stats' },
+      ],
+    ],
+  };
+}
+
+async function bumpDailyStat(env, field, n = 1) {
+  if (!env?.TOPIC_MAP) return;
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    const key = `stats:${day}`;
+    let obj = {};
+    try {
+      const raw = await env.TOPIC_MAP.get(key);
+      if (raw) obj = JSON.parse(raw);
+    } catch { obj = {}; }
+    if (!obj || typeof obj !== 'object') obj = {};
+    obj[field] = Number(obj[field] || 0) + Number(n || 0);
+    obj.updated_at = Date.now();
+    await env.TOPIC_MAP.put(key, JSON.stringify(obj), { expirationTtl: 21 * 86400 });
+  } catch { /* 统计失败不影响主流程 */ }
+}
+
+async function getDailyStats(env, day = new Date().toISOString().slice(0, 10)) {
+  try {
+    const raw = await env.TOPIC_MAP.get(`stats:${day}`);
+    if (!raw) return { day, messages_in: 0, bans: 0, verifies: 0, spam: 0 };
+    const obj = JSON.parse(raw);
+    return {
+      day,
+      messages_in: Number(obj.messages_in || 0),
+      bans: Number(obj.bans || 0),
+      verifies: Number(obj.verifies || 0),
+      spam: Number(obj.spam || 0),
+      updated_at: obj.updated_at,
+    };
+  } catch {
+    return { day, messages_in: 0, bans: 0, verifies: 0, spam: 0 };
+  }
+}
+
+async function resolveThreadIdForUser(env, userId) {
+  const rec = await safeGetJSON(env, `user:${userId}`, null);
+  if (rec?.thread_id) return rec.thread_id;
+  if (env.TG_BOT_DB) {
+    try {
+      const u = await createD1Storage(env.TG_BOT_DB).getUser(userId);
+      if (u?.topicId) return u.topicId;
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
 async function handleHelpCommand(env, threadId) {
-  const helpText = `📋 **指令列表**
+  const helpText = `📋 <b>指令列表</b> · v${GATEWAY_VERSION}
 
-**用户指令：**
-/start - 开始对话（触发验证）
-/help - 显示此帮助信息
+<b>权限</b>
+• 群主/管理员 或 <code>ADMIN_IDS</code> 可用管理指令
+• 私聊用户：<code>/start</code> <code>/help</code>
+• 菜单需 BotFather 手动注册；看见 ≠ 可用
 
-**管理员指令（话题内）：**
-/close - 关闭对话
-/open - 恢复对话
-/reset - 重置用户验证
-/trust - 设置永久信任
-/ban - 封禁用户
-/unban - 解封用户
-/info - 查看用户信息
-/cleanup - 清理无效话题
+<b>全局</b>
+/help · /sysinfo · /stats · /whoami · /find 关键词
+/cleanup · /listwords · /addword · /delword
+/synccommands <i>(仅 OWNER_IDS)</i>
 
-**屏蔽词管理：**
-/addword 词 - 添加屏蔽词
-/delword 词 - 删除屏蔽词
-/listwords - 查看屏蔽词列表
+<b>用户话题内</b>
+/panel · /info · /note 备注
+/ban · /unban · /close · /open · /mute · /unmute
+/trust · /reset
 
-**关于：**
-• 私聊机器人发送消息，管理员在话题内回复
-• 支持文本、图片、视频、文档等多种消息类型
-• 内置人机验证和垃圾内容过滤`;
-  await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: helpText, parse_mode: "Markdown" });
+点 <code>/panel</code> 可用按钮操作，无需记命令。`;
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: helpText,
+    parse_mode: "HTML",
+  });
+}
+
+function formatSysTime(ts) {
+  if (ts == null || ts === '' || Number(ts) <= 0) return '无';
+  try {
+    return new Date(Number(ts)).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
+  } catch {
+    return String(ts);
+  }
+}
+
+async function countKvPrefix(env, prefix) {
+  if (!env?.TOPIC_MAP?.list) return null;
+  let total = 0;
+  let cursor;
+  let pages = 0;
+  const maxPages = 20; // 防止超大命名空间拖垮命令
+  do {
+    const result = await env.TOPIC_MAP.list({ prefix, cursor, limit: 1000 });
+    total += (result.keys || []).length;
+    cursor = result.list_complete ? undefined : result.cursor;
+    pages += 1;
+  } while (cursor && pages < maxPages);
+  return { total, truncated: Boolean(cursor) };
+}
+
+async function collectRecentErrors(env) {
+  let kvErrors = [];
+  try {
+    if (env?.TOPIC_MAP) {
+      const raw = await env.TOPIC_MAP.get('sys:recent_errors');
+      if (raw) kvErrors = JSON.parse(raw);
+    }
+  } catch { kvErrors = []; }
+  if (!Array.isArray(kvErrors)) kvErrors = [];
+  const merged = [];
+  const seen = new Set();
+  for (const item of [...recentSystemErrors, ...kvErrors]) {
+    if (!item || typeof item !== 'object') continue;
+    const key = `${item.ts}|${item.action}|${item.error}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  merged.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+  return merged.slice(0, 8);
+}
+
+async function getCachedKvPrefixCounts(env) {
+  const now = Date.now();
+  if (sysinfoKvCache.data && now - sysinfoKvCache.ts < sysinfoKvCache.ttlMs) {
+    return sysinfoKvCache.data;
+  }
+  const prefixes = [
+    ['user:', '用户会话'],
+    ['thread:', '话题反查'],
+    ['banned:', '封禁'],
+    ['muted:', '静音'],
+    ['profile:', '资料快照'],
+    ['note:', '备注'],
+    ['chal:', '验证挑战'],
+    ['turnstile_code:', 'Turnstile'],
+    ['pending_turnstile:', '待转发'],
+    ['stats:', '日统计'],
+    ['sys:', '系统键'],
+  ];
+  const rows = [];
+  for (const [prefix, label] of prefixes) {
+    const c = await countKvPrefix(env, prefix);
+    rows.push({ prefix, label, ...(c || { total: 0, truncated: false }) });
+  }
+  sysinfoKvCache.ts = now;
+  sysinfoKvCache.data = rows;
+  return rows;
+}
+
+/**
+ * 构建 sysinfo 某一页正文
+ * @param {'overview'|'storage'|'errors'|'stats'} page
+ */
+async function buildSysinfoPageText(env, page = 'overview') {
+  const started = Date.now();
+  const hasKv = Boolean(env.TOPIC_MAP && typeof env.TOPIC_MAP.get === 'function');
+  const hasD1 = Boolean(env.TG_BOT_DB && typeof env.TG_BOT_DB.prepare === 'function');
+  const baseUrl = String(env.VERIFICATION_PAGE_URL || '').replace(/\/$/, '') || '(未配置 VERIFICATION_PAGE_URL)';
+  const turnstileOn = !!(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY && env.VERIFICATION_PAGE_URL);
+  const lines = [];
+
+  if (page === 'overview' || page === 'stats') {
+    lines.push(`🖥 <b>系统 · ${page === 'stats' ? '今日统计' : '概览'}</b> · v${GATEWAY_VERSION}`);
+    lines.push('────────────');
+    lines.push(`状态: <b>运行中</b>`);
+    lines.push(`KV: ${hasKv ? '✅' : '❌'} · D1: ${hasD1 ? '✅' : '❌'} · 验证: ${turnstileOn ? 'Turnstile' : '本地题库'}`);
+    lines.push(`OWNER 已配: ${parseIdAllowlist(env.OWNER_IDS).size > 0 ? '✅' : '⚪'} · SUPERGROUP: ${
+      String(env.SUPERGROUP_ID || '').startsWith('-100') ? '✅' : '❌'
+    }`);
+    lines.push('');
+
+    if (hasD1) {
+      try {
+        await ensureMigrations(env.TG_BOT_DB);
+        const stats = await createD1Storage(env.TG_BOT_DB).getSystemStats();
+        lines.push(`📊 会话 <b>${stats.usersTotal}</b> 用户 · Topic ${stats.usersWithTopic} · 封禁 ${stats.usersBanned} · 关闭 ${stats.usersClosed || 0}`);
+        lines.push(`🗂 映射 ${stats.messageLinks} · 规则 ${stats.rulesTotal} · 处理中 ${stats.updatesProcessing} · 可重试 ${stats.updatesRetryable}`);
+        const recent = stats.recentActiveUsers?.length
+          ? stats.recentActiveUsers
+          : (stats.lastActiveUser ? [stats.lastActiveUser] : []);
+        if (recent.length) {
+          lines.push('');
+          lines.push('<b>最近活跃</b>');
+          for (const u of recent.slice(0, 5)) {
+            const name = escapeHtml([u.firstName, u.lastName].filter(Boolean).join(' ').trim() || '未知');
+            const un = u.username ? `@${escapeHtml(u.username)}` : '无用户名';
+            lines.push(`• ${name} · ${un} · <code>${escapeHtml(u.userId)}</code> · ${formatSysTime(u.lastMessageAt)}`);
+          }
+        } else {
+          lines.push('最近活跃: 暂无');
+        }
+        if (stats.updatesProcessing > 20) {
+          lines.push('');
+          lines.push('⚠️ Update 处理中数量偏高，请检查 Webhook 是否持续 5xx');
+        }
+      } catch (e) {
+        recordSystemError('sysinfo_d1_failed', e, {}, env);
+        lines.push(`D1 读取失败: ${escapeHtml(e?.message || String(e))}`);
+      }
+    } else {
+      lines.push('D1 未绑定，无法显示会话统计');
+    }
+
+    if (page === 'stats') {
+      const today = await getDailyStats(env);
+      lines.push('');
+      lines.push(`<b>今日 ${escapeHtml(today.day)}</b>`);
+      lines.push(`• 入站消息: <b>${today.messages_in}</b>`);
+      lines.push(`• 验证通过: ${today.verifies}`);
+      lines.push(`• 封禁次数: ${today.bans}`);
+      lines.push(`• 垃圾拦截: ${today.spam}`);
+    }
+
+    lines.push('');
+    lines.push('<b>端点</b>');
+    lines.push(`<code>GET ${escapeHtml(baseUrl)}/health</code>`);
+    lines.push(`<code>GET …/health/env</code> · <code>/health/d1</code> · <code>/verify</code>`);
+    lines.push(`<code>POST ${escapeHtml(baseUrl)}/</code> Webhook`);
+  }
+
+  if (page === 'storage') {
+    lines.push(`🗄 <b>系统 · 存储</b> · v${GATEWAY_VERSION}`);
+    lines.push('────────────');
+    if (hasD1) {
+      try {
+        const stats = await createD1Storage(env.TG_BOT_DB).getSystemStats();
+        lines.push('<b>D1</b>');
+        lines.push(`• users: ${stats.usersTotal} (topic ${stats.usersWithTopic})`);
+        lines.push(`• banned ${stats.usersBanned} · closed ${stats.usersClosed || 0}`);
+        lines.push(`• message_links ${stats.messageLinks} · rules ${stats.rulesTotal}`);
+        lines.push(`• processed processing/retryable: ${stats.updatesProcessing}/${stats.updatesRetryable}`);
+      } catch (e) {
+        lines.push(`D1: ${escapeHtml(e?.message || String(e))}`);
+      }
+    } else lines.push('D1: 未绑定');
+    lines.push('');
+    lines.push('<b>KV 前缀</b>');
+    if (hasKv) {
+      try {
+        const rows = await getCachedKvPrefixCounts(env);
+        for (const r of rows) {
+          lines.push(`• ${r.label} <code>${r.prefix}</code> ${r.total}${r.truncated ? '+' : ''}`);
+        }
+        lines.push('<i>计数缓存约 45s</i>');
+      } catch (e) {
+        lines.push(`KV: ${escapeHtml(e?.message || String(e))}`);
+      }
+    } else lines.push('KV: 未绑定');
+  }
+
+  if (page === 'errors') {
+    lines.push(`⚠️ <b>系统 · 最近错误</b> · v${GATEWAY_VERSION}`);
+    lines.push('────────────');
+    const top = await collectRecentErrors(env);
+    if (!top.length) {
+      lines.push('暂无记录。');
+      lines.push('<i>冷启动后内存缓冲会清空；成功路径不记入。</i>');
+    } else {
+      for (const err of top) {
+        const when = formatSysTime(err.ts);
+        const act = escapeHtml(err.action || '?');
+        const msg = escapeHtml(String(err.error || '').slice(0, 140));
+        const uid = err.userId ? ` uid=${escapeHtml(err.userId)}` : '';
+        lines.push(`• <code>${when}</code>`);
+        lines.push(`  [${act}]${uid} ${msg}`);
+      }
+    }
+  }
+
+  lines.push('');
+  lines.push(`⏱ ${Date.now() - started} ms`);
+  let text = lines.join('\n');
+  if (text.length > 3500) text = `${text.slice(0, 3500)}\n…`;
+  return text;
+}
+
+/**
+ * @param {object} env
+ * @param {number|undefined} threadId
+ * @param {object} [opts]
+ * @param {'overview'|'storage'|'errors'|'stats'} [opts.page]
+ * @param {{chatId:number,messageId:number}|null} [opts.edit]
+ */
+async function handleSysinfoCommand(env, threadId, opts = {}) {
+  const page = opts.page || 'overview';
+  const text = await buildSysinfoPageText(env, page);
+  const markup = buildSysinfoKeyboard(page === 'stats' ? 'overview' : page);
+  if (opts.edit?.chatId && opts.edit?.messageId) {
+    const res = await tgCall(env, 'editMessageText', {
+      chat_id: opts.edit.chatId,
+      message_id: opts.edit.messageId,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: markup,
+    });
+    if (!res?.ok) {
+      await tgCall(env, 'sendMessage', {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: markup,
+      });
+    }
+    return;
+  }
+  await tgCall(env, 'sendMessage', {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    reply_markup: markup,
+  });
+}
+
+async function handleStatsCommand(env, threadId) {
+  await handleSysinfoCommand(env, threadId, { page: 'stats' });
+}
+
+async function handleWhoamiCommand(env, threadId, senderId) {
+  const admin = await isAdminUser(env, senderId);
+  const owner = isOwnerUser(env, senderId);
+  let member = 'unknown';
+  try {
+    const res = await tgCall(env, 'getChatMember', {
+      chat_id: env.SUPERGROUP_ID,
+      user_id: senderId,
+    });
+    member = res.result?.status || res.description || 'unknown';
+  } catch { /* ignore */ }
+  const text = [
+    '🪪 <b>Whoami</b>',
+    `UID: <code>${senderId}</code>`,
+    `群身份: <code>${escapeHtml(member)}</code>`,
+    `管理指令权限: ${admin ? '✅ 是' : '❌ 否'}`,
+    `OWNER_IDS: ${owner ? '✅ 是' : '❌ 否'}`,
+  ].join('\n');
+  await tgCall(env, 'sendMessage', {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text,
+    parse_mode: 'HTML',
+  });
+}
+
+async function handleFindCommand(env, threadId, queryText) {
+  const q = queryText.replace(/^\/find(@\w+)?\s*/i, '').trim();
+  if (!q) {
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: '用法: <code>/find UID或用户名或姓名</code>',
+      parse_mode: 'HTML',
+    });
+    return;
+  }
+  if (!env.TG_BOT_DB) {
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: '❌ D1 未绑定，无法搜索',
+    });
+    return;
+  }
+  try {
+    await ensureMigrations(env.TG_BOT_DB);
+    const hits = await createD1Storage(env.TG_BOT_DB).searchUsers(q, 10);
+    if (!hits.length) {
+      await tgCall(env, 'sendMessage', {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: `未找到匹配「${escapeHtml(q)}」的用户`,
+        parse_mode: 'HTML',
+      });
+      return;
+    }
+    const lines = [`🔎 <b>查找结果</b> · ${hits.length} 条`, ''];
+    for (const u of hits) {
+      const name = escapeHtml([u.firstName, u.lastName].filter(Boolean).join(' ').trim() || '未知');
+      const un = u.username ? `@${escapeHtml(u.username)}` : '无用户名';
+      lines.push(`• ${name} · ${un}`);
+      lines.push(`  UID <code>${escapeHtml(u.userId)}</code> · Topic <code>${escapeHtml(u.topicId || '-')}</code> · ${escapeHtml(u.status || '?')}`);
+      lines.push(`  最近: ${formatSysTime(u.lastMessageAt)}`);
+    }
+    lines.push('', '<i>请到对应用户 Forum Topic 内使用 /panel 操作</i>');
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML',
+    });
+  } catch (e) {
+    recordSystemError('find_failed', e, {}, env);
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: `❌ 搜索失败: ${escapeHtml(e?.message || String(e))}`,
+      parse_mode: 'HTML',
+    });
+  }
+}
+
+async function handleSyncCommandsCommand(env, threadId, senderId) {
+  if (!isOwnerUser(env, senderId)) {
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: '❌ 仅 <code>OWNER_IDS</code> 可同步 Bot 命令菜单',
+      parse_mode: 'HTML',
+    });
+    return;
+  }
+  const commands = [
+    { command: 'start', description: '开始对话' },
+    { command: 'help', description: '帮助' },
+    { command: 'sysinfo', description: '系统信息' },
+    { command: 'stats', description: '今日统计' },
+    { command: 'panel', description: '用户快捷面板' },
+    { command: 'info', description: '用户资料' },
+    { command: 'find', description: '查找用户' },
+    { command: 'whoami', description: '查看我的权限' },
+    { command: 'ban', description: '封禁用户' },
+    { command: 'unban', description: '解封用户' },
+    { command: 'close', description: '关闭对话' },
+    { command: 'open', description: '打开对话' },
+    { command: 'listwords', description: '屏蔽词列表' },
+    { command: 'synccommands', description: '同步命令菜单' },
+  ];
+  const res = await tgCall(env, 'setMyCommands', { commands });
+  await tgCall(env, 'sendMessage', {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: res?.ok
+      ? `✅ 已同步 ${commands.length} 条命令到 Bot 菜单`
+      : `❌ 同步失败: ${escapeHtml(res?.description || 'unknown')}`,
+    parse_mode: 'HTML',
+  });
+}
+
+async function handlePanelCommand(env, threadId, userId) {
+  const from = await resolveUserFromForTopic(env, userId, null);
+  const name = escapeHtml([from.first_name, from.last_name].filter(Boolean).join(' ').trim() || '未知');
+  const un = from.username ? `@${escapeHtml(from.username)}` : '无用户名';
+  const text = [
+    '🎛 <b>用户操作面板</b>',
+    `用户: ${name} · ${un}`,
+    `UID: <code>${userId}</code>`,
+    '',
+    '点击下方按钮执行操作（无需记忆命令）',
+  ].join('\n');
+  await tgCall(env, 'sendMessage', {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text,
+    parse_mode: 'HTML',
+    reply_markup: buildUserActionKeyboard(userId),
+  });
+}
+
+async function handleMuteCommand(env, threadId, userId) {
+  await env.TOPIC_MAP.put(`muted:${userId}`, '1');
+  if (env.TG_BOT_DB) {
+    try { await createD1Storage(env.TG_BOT_DB).updateUserState(userId, { isMuted: true }); } catch { /* ignore */ }
+  }
+  await tgCall(env, 'sendMessage', {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: '🔇 <b>已静音</b>：用户消息不再转发到本群',
+    parse_mode: 'HTML',
+  });
+  await tgCall(env, 'sendMessage', {
+    chat_id: userId,
+    text: '🔇 您已被管理员静音，消息暂时不会送达管理员。',
+  });
+}
+
+async function handleUnmuteCommand(env, threadId, userId) {
+  await env.TOPIC_MAP.delete(`muted:${userId}`);
+  await env.TOPIC_MAP.delete(`mute_notice:${userId}`);
+  if (env.TG_BOT_DB) {
+    try { await createD1Storage(env.TG_BOT_DB).updateUserState(userId, { isMuted: false }); } catch { /* ignore */ }
+  }
+  await tgCall(env, 'sendMessage', {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: '🔊 <b>已取消静音</b>',
+    parse_mode: 'HTML',
+  });
+  await tgCall(env, 'sendMessage', {
+    chat_id: userId,
+    text: '🔊 您的静音已取消，可以继续联系管理员。',
+  });
+}
+
+async function handleNoteCommand(env, threadId, userId, text) {
+  const note = text.replace(/^\/note(@\w+)?\s*/i, '').trim();
+  if (!note) {
+    const existing = await env.TOPIC_MAP.get(`note:${userId}`);
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: existing
+        ? `📝 <b>当前备注</b>\n${escapeHtml(existing)}\n\n用法: <code>/note 新备注</code>（发 <code>/note clear</code> 清空）`
+        : '📝 暂无备注。用法: <code>/note 内容</code>',
+      parse_mode: 'HTML',
+    });
+    return;
+  }
+  if (note.toLowerCase() === 'clear' || note === '-' || note === '清除') {
+    await env.TOPIC_MAP.delete(`note:${userId}`);
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: '✅ 备注已清除',
+    });
+    return;
+  }
+  await env.TOPIC_MAP.put(`note:${userId}`, note.slice(0, 500), { expirationTtl: 365 * 86400 });
+  await tgCall(env, 'sendMessage', {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: `✅ 备注已保存：\n${escapeHtml(note.slice(0, 500))}`,
+    parse_mode: 'HTML',
+  });
 }
 
 async function handleAddWordCommand(env, threadId, text, senderId) {
@@ -1784,22 +2576,230 @@ async function handleTrustCommand(env, threadId, userId) {
 
 async function handleBanCommand(env, threadId, userId) {
   await env.TOPIC_MAP.put(`banned:${userId}`, "1");
-  await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🚫 **用户已封禁**", parse_mode: "Markdown" });
+  if (env.TG_BOT_DB) {
+    try {
+      await createD1Storage(env.TG_BOT_DB).updateUserState(userId, { status: 'banned' });
+    } catch (e) {
+      Logger.warn('ban_d1_update_failed', { userId, error: e?.message });
+    }
+  }
+  await bumpDailyStat(env, 'bans', 1);
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: "🚫 **用户已封禁**（已尝试通知对方）",
+    parse_mode: "Markdown",
+  });
+  // 主动告知用户已被封禁，避免对方不知情仍持续发消息
+  const notify = await tgCall(env, "sendMessage", {
+    chat_id: userId,
+    text: "🚫 您已被管理员封禁，暂时无法继续发送消息。如有疑问请等待管理员处理。",
+  });
+  if (!notify?.ok) {
+    Logger.warn('ban_user_notify_failed', {
+      userId,
+      description: notify?.description,
+    });
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: `⚠️ 已封禁，但通知用户失败（可能对方未私聊过机器人或已拉黑）：${notify?.description || 'unknown'}`,
+    });
+  } else {
+    await env.TOPIC_MAP.put(`ban_notice:${userId}`, "1", { expirationTtl: 3600 });
+  }
 }
 
 async function handleUnbanCommand(env, threadId, userId) {
   await env.TOPIC_MAP.delete(`banned:${userId}`);
-  await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "✅ **用户已解封**", parse_mode: "Markdown" });
+  await env.TOPIC_MAP.delete(`ban_notice:${userId}`);
+  if (env.TG_BOT_DB) {
+    try {
+      await createD1Storage(env.TG_BOT_DB).updateUserState(userId, { status: 'active' });
+    } catch (e) {
+      Logger.warn('unban_d1_update_failed', { userId, error: e?.message });
+    }
+  }
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: "✅ **用户已解封**（已尝试通知对方）",
+    parse_mode: "Markdown",
+  });
+  const notify = await tgCall(env, "sendMessage", {
+    chat_id: userId,
+    text: "✅ 您已被管理员解封，可以继续发送消息了。",
+  });
+  if (!notify?.ok) {
+    Logger.warn('unban_user_notify_failed', {
+      userId,
+      description: notify?.description,
+    });
+  }
 }
 
 async function handleInfoCommand(env, threadId, userId) {
   const userKey = `user:${userId}`;
-  const userRec = await safeGetJSON(env, userKey, null);
+  let userRec = await safeGetJSON(env, userKey, null);
   const verifyStatus = await getVerificationState(env, userId);
   const banStatus = await env.TOPIC_MAP.get(`banned:${userId}`);
 
-  const info = `👤 **用户信息**\nUID: \`${userId}\`\nTopic ID: \`${threadId}\`\n话题标题: ${userRec?.title || "未知"}\n验证状态: ${verifyStatus ? (verifyStatus.type === 'trusted' ? '🌟 永久信任' : '✅ 已验证') : '❌ 未验证'}\n封禁状态: ${banStatus ? '🚫 已封禁' : '✅ 正常'}\nLink: [点击私聊](tg://user?id=${userId})`;
-  await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: info, parse_mode: "Markdown" });
+  // 补全资料并尽量修复历史「User」占位话题名
+  const from = await resolveUserFromForTopic(env, userId, null);
+  const resolvedTitle = buildTopicTitle(from);
+  if (
+    userRec?.thread_id
+    && resolvedTitle
+    && resolvedTitle !== 'User'
+    && (!userRec.title || userRec.title === 'User' || /^User(\s@|$)/i.test(userRec.title))
+  ) {
+    try {
+      const edit = await tgCall(env, 'editForumTopic', {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: userRec.thread_id,
+        name: resolvedTitle,
+      });
+      if (edit?.ok) {
+        userRec = { ...userRec, title: resolvedTitle };
+        await env.TOPIC_MAP.put(userKey, JSON.stringify(userRec));
+      }
+    } catch (e) {
+      Logger.warn('info_topic_title_repair_failed', { userId, error: e?.message });
+    }
+  }
+
+  const displayName = escapeHtml(
+    [from.first_name, from.last_name].filter(Boolean).join(' ').trim() || '未知',
+  );
+  const usernameText = from.username
+    ? `@${escapeHtml(from.username)}`
+    : '无';
+  // t.me/username 在群内可点；tg://user?id= 在部分客户端对“群外用户”不可点
+  const openLink = from.username
+    ? `<a href="https://t.me/${escapeHtml(from.username)}">打开主页 @${escapeHtml(from.username)}</a>`
+    : `<a href="tg://user?id=${userId}">打开用户资料</a>`;
+  const topicTitle = escapeHtml(userRec?.title || resolvedTitle || '未知');
+  const verifyText = verifyStatus
+    ? (verifyStatus.type === 'trusted' ? '🌟 永久信任' : '✅ 已验证')
+    : '❌ 未验证';
+  const banText = banStatus ? '🚫 已封禁' : '✅ 正常';
+  const muted = await env.TOPIC_MAP.get(`muted:${userId}`);
+  const note = await env.TOPIC_MAP.get(`note:${userId}`);
+  let lastMsgAt = null;
+  let d1Status = null;
+  if (env.TG_BOT_DB) {
+    try {
+      const u = await createD1Storage(env.TG_BOT_DB).getUser(userId);
+      lastMsgAt = u?.lastMessageAt ?? null;
+      d1Status = u?.status ?? null;
+    } catch { /* ignore */ }
+  }
+
+  const info = [
+    '👤 <b>用户信息</b>',
+    `姓名: ${displayName}`,
+    `用户名: ${usernameText}`,
+    `UID: <code>${userId}</code>`,
+    `Topic ID: <code>${threadId}</code>`,
+    `话题标题: ${topicTitle}`,
+    `验证: ${verifyText}`,
+    `封禁: ${banText} · 静音: ${muted ? '🔇 是' : '否'} · 会话关闭: ${userRec?.closed ? '是' : '否'}`,
+    d1Status ? `D1 状态: <code>${escapeHtml(d1Status)}</code>` : '',
+    `最近消息: ${formatSysTime(lastMsgAt)}`,
+    note ? `备注: ${escapeHtml(note)}` : '备注: 无（/note 内容）',
+    `链接: ${openLink}`,
+    from.username
+      ? ''
+      : '<i>无公开用户名时部分客户端无法点击 tg 链接</i>',
+  ].filter(Boolean).join('\n');
+
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: info,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: buildUserActionKeyboard(userId),
+  });
+}
+
+/**
+ * 管理 UI 回调：adm:sys:* / adm:u:action:userId
+ */
+async function handleAdminUiCallback(query, env, ctx) {
+  const data = String(query.data || '');
+  const senderId = query.from?.id;
+  if (!senderId || !(await isAdminUser(env, senderId))) {
+    await tgCall(env, 'answerCallbackQuery', {
+      callback_query_id: query.id,
+      text: '无权限',
+      show_alert: true,
+    });
+    return;
+  }
+
+  const threadId = query.message?.message_thread_id;
+  const chatId = query.message?.chat?.id;
+  const messageId = query.message?.message_id;
+  const parts = data.split(':');
+
+  // adm:sys:overview | storage | errors | stats
+  if (parts[0] === 'adm' && parts[1] === 'sys') {
+    const page = parts[2] || 'overview';
+    await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
+    await handleSysinfoCommand(env, threadId, {
+      page: ['overview', 'storage', 'errors', 'stats'].includes(page) ? page : 'overview',
+      edit: chatId && messageId ? { chatId, messageId } : null,
+    });
+    return;
+  }
+
+  // adm:u:ban:123
+  if (parts[0] === 'adm' && parts[1] === 'u' && parts.length >= 4) {
+    const action = parts[2];
+    const userId = parts[3];
+    const tid = (await resolveThreadIdForUser(env, userId)) || threadId;
+    if (!tid) {
+      await tgCall(env, 'answerCallbackQuery', {
+        callback_query_id: query.id,
+        text: '找不到用户话题',
+        show_alert: true,
+      });
+      return;
+    }
+    await tgCall(env, 'answerCallbackQuery', {
+      callback_query_id: query.id,
+      text: '已执行',
+    });
+    const map = {
+      ban: () => handleBanCommand(env, tid, userId),
+      unban: () => handleUnbanCommand(env, tid, userId),
+      close: () => handleCloseCommand(env, tid, userId),
+      open: () => handleOpenCommand(env, tid, userId),
+      trust: () => handleTrustCommand(env, tid, userId),
+      reset: () => handleResetCommand(env, tid, userId),
+      mute: () => handleMuteCommand(env, tid, userId),
+      unmute: () => handleUnmuteCommand(env, tid, userId),
+      info: () => handleInfoCommand(env, tid, userId),
+      panel: () => handlePanelCommand(env, tid, userId),
+    };
+    const fn = map[action];
+    if (fn) await fn();
+    else {
+      await tgCall(env, 'answerCallbackQuery', {
+        callback_query_id: query.id,
+        text: '未知操作',
+        show_alert: true,
+      });
+    }
+    return;
+  }
+
+  await tgCall(env, 'answerCallbackQuery', {
+    callback_query_id: query.id,
+    text: '未知回调',
+    show_alert: true,
+  });
 }
 
 /**
@@ -1811,9 +2811,18 @@ async function _handleAdminReplyInner(msg, env, ctx) {
   const rawText = (msg.text || "").trim();
   const text = removeCommandBotSuffix(rawText); // 移除 @botname 后缀
   const senderId = msg.from?.id;
+  const isCommand = !!text && text.startsWith('/');
 
   // 仅允许管理员在群内操作与回信，防止任意群成员向用户私聊注入消息
   if (!senderId || !(await isAdminUser(env, senderId))) {
+    // 非管理员尝试斜杠命令时给出提示，避免「没反应」困惑
+    if (isCommand && senderId) {
+      await tgCall(env, 'sendMessage', {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: '⛔ 无管理权限：仅群主/管理员或 ADMIN_IDS 白名单可使用指令。',
+      });
+    }
     return;
   }
 
@@ -1826,6 +2835,26 @@ async function _handleAdminReplyInner(msg, env, ctx) {
   // --- 全局命令路由表（不依赖 userId，可在 General 话题执行） ---
   if (text === "/help") {
     await handleHelpCommand(env, threadId);
+    return;
+  }
+  if (text === "/sysinfo" || text === "/system" || text === "/status") {
+    await handleSysinfoCommand(env, threadId, { page: 'overview' });
+    return;
+  }
+  if (text === "/stats") {
+    await handleStatsCommand(env, threadId);
+    return;
+  }
+  if (text === "/whoami") {
+    await handleWhoamiCommand(env, threadId, senderId);
+    return;
+  }
+  if (text === "/synccommands") {
+    await handleSyncCommandsCommand(env, threadId, senderId);
+    return;
+  }
+  if (text.startsWith("/find")) {
+    await handleFindCommand(env, threadId, text);
     return;
   }
   if (text.startsWith("/addword ")) {
@@ -1853,6 +2882,13 @@ async function _handleAdminReplyInner(msg, env, ctx) {
     && Date.now() - threadNotFoundCache.get(threadId) < THREAD_NOT_FOUND_TTL_MS
   ) {
     // 负缓存：已知该 threadId 无映射，直接跳过
+    if (isCommand) {
+      await tgCall(env, 'sendMessage', {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: '⚠️ 当前话题未关联用户（请在对应用户 Forum Topic 内执行，或使用 /find）。',
+      });
+    }
     return;
   } else {
     // 降级全量扫描（带数量限制，防止 DoS）
@@ -1876,7 +2912,16 @@ async function _handleAdminReplyInner(msg, env, ctx) {
   }
 
   // 如果找不到用户，说明可能是在普通话题，或者数据丢失，直接返回
-  if (!userId) return;
+  if (!userId) {
+    if (isCommand) {
+      await tgCall(env, 'sendMessage', {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: '⚠️ 当前话题未关联用户。全局命令：/sysinfo /stats /find /help',
+      });
+    }
+    return;
+  }
 
   // --- 话题内指令路由表 ---
   if (text === "/close") { await handleCloseCommand(env, threadId, userId); return; }
@@ -1886,6 +2931,10 @@ async function _handleAdminReplyInner(msg, env, ctx) {
   if (text === "/ban") { await handleBanCommand(env, threadId, userId); return; }
   if (text === "/unban") { await handleUnbanCommand(env, threadId, userId); return; }
   if (text === "/info") { await handleInfoCommand(env, threadId, userId); return; }
+  if (text === "/panel") { await handlePanelCommand(env, threadId, userId); return; }
+  if (text === "/mute") { await handleMuteCommand(env, threadId, userId); return; }
+  if (text === "/unmute") { await handleUnmuteCommand(env, threadId, userId); return; }
+  if (text.startsWith("/note")) { await handleNoteCommand(env, threadId, userId, text); return; }
 
   // 非命令消息：转发管理员回复给用户
   if (msg.media_group_id) {
@@ -1911,7 +2960,8 @@ async function _handleAdminReplyInner(msg, env, ctx) {
 
 // ---------------- 验证模块 (纯本地) ----------------
 
-async function sendVerificationChallenge(userId, env, pendingMsgId) {
+async function sendVerificationChallenge(userId, env, pendingMsgId, from = null) {
+  if (from) await saveUserProfileSnapshot(env, userId, from);
   // 追踪已写入的 KV 键，用于异常时回滚
   const writtenKeys = [];
   try {
@@ -2163,6 +3213,7 @@ async function handleCallbackQuery(query, env, ctx) {
         verifyId,
         selectedOption: state.options[selectedIndex]
       });
+      await bumpDailyStat(env, 'verifies', 1);
 
       // 30天有效期
       await ephemeralStore(env).setVerification(userId, {
@@ -2249,10 +3300,11 @@ async function forwardPendingMessages(state, userId, query, env, ctx) {
           Logger.info('message_forward_duplicate_skipped', { userId, messageId: pendingId });
           return { forwarded: false, reason: 'already_forwarded' };
         }
+        const topicFrom = await resolveUserFromForTopic(env, userId, query?.from);
         const fakeMsg = {
           message_id: pendingId,
           chat: { id: userId, type: "private" },
-          from: query.from,
+          from: topicFrom,
         };
         await forwardToTopic(fakeMsg, userId, `user:${userId}`, env, ctx);
         await env.TOPIC_MAP.put(forwardedKey, "1", { expirationTtl: 3600 });
@@ -2513,14 +3565,18 @@ async function updateThreadStatus(threadId, isClosed, env) {
 }
 
 // 改进的话题标题构建（清理特殊字符）
+// 期望输入 Telegram User 形态：{ first_name, last_name, username }
+// 资料缺失时勿在调用方传入仅 { id } 的 from（会退化为 "User"）；应先 resolveUserFromForTopic。
 function buildTopicTitle(from) {
-  const firstName = (from.first_name || "").trim().substring(0, CONFIG.MAX_NAME_LENGTH);
-  const lastName = (from.last_name || "").trim().substring(0, CONFIG.MAX_NAME_LENGTH);
+  const src = from || {};
+  const firstName = (src.first_name || src.firstName || "").trim().substring(0, CONFIG.MAX_NAME_LENGTH);
+  const lastName = (src.last_name || src.lastName || "").trim().substring(0, CONFIG.MAX_NAME_LENGTH);
 
   // 清理 username
   let username = "";
-  if (from.username) {
-    username = from.username
+  const rawUsername = src.username || "";
+  if (rawUsername) {
+    username = String(rawUsername)
       .replace(/[^\w]/g, '') // 只保留字母数字下划线
       .substring(0, 20);
   }

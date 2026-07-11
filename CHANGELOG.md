@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 管理体验
+
+- 新增 `/panel` 用户快捷按钮面板；`/info` 附带操作按钮与备注/静音/最近消息。
+- `/sysinfo` 分页：概览 / 存储 / 错误 / 今日统计，带刷新按钮。
+- 新增 `/stats` `/whoami` `/find` `/note` `/mute` `/unmute`；Owner 可用 `/synccommands` 同步 Bot 菜单。
+- 非管理员误发指令有提示；私聊 `/help` 对普通用户可见。
+- 封禁/静音会通知用户；话题标题缺资料时自动补全与修复。
+
 ### 文档与发布
 
 - 部署文档仅保留 **dist 单文件手动粘贴到 Cloudflare Worker** 路径，移除 Wrangler/Git 自动部署作为推荐方式。

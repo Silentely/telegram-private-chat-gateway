@@ -67,10 +67,63 @@ export function createMockD1() {
         if (/^SELECT COUNT\(\*\) AS total FROM rules/i.test(normalized)) {
           return { total: (tables.get('rules') || []).length };
         }
+        if (/^SELECT COUNT\(\*\) AS total FROM users WHERE topic_id IS NOT NULL/i.test(normalized)) {
+          return {
+            total: (tables.get('users') || []).filter(row => row.topic_id != null).length,
+          };
+        }
+        if (/^SELECT COUNT\(\*\) AS total FROM users WHERE status = 'banned'/i.test(normalized)) {
+          return {
+            total: (tables.get('users') || []).filter(row => row.status === 'banned').length,
+          };
+        }
+        if (/^SELECT COUNT\(\*\) AS total FROM users WHERE status = 'closed'/i.test(normalized)) {
+          return {
+            total: (tables.get('users') || []).filter(row => row.status === 'closed').length,
+          };
+        }
+        if (/^SELECT COUNT\(\*\) AS total FROM users/i.test(normalized)) {
+          return { total: (tables.get('users') || []).length };
+        }
+        if (/^SELECT COUNT\(\*\) AS total FROM processed_updates WHERE status = 'processing'/i.test(normalized)) {
+          return {
+            total: (tables.get('processed_updates') || []).filter(row => row.status === 'processing').length,
+          };
+        }
+        if (/^SELECT COUNT\(\*\) AS total FROM processed_updates WHERE status = 'retryable'/i.test(normalized)) {
+          return {
+            total: (tables.get('processed_updates') || []).filter(row => row.status === 'retryable').length,
+          };
+        }
+        if (/^SELECT COUNT\(\*\) AS total FROM message_links/i.test(normalized)) {
+          return { total: (tables.get('message_links') || []).length };
+        }
+        if (/FROM users[\s\S]*ORDER BY COALESCE\(last_message_at/i.test(normalized)) {
+          const rows = [...(tables.get('users') || [])]
+            .sort((a, b) => Number(b.last_message_at || 0) - Number(a.last_message_at || 0));
+          return rows[0] ? { ...rows[0] } : null;
+        }
         throw new Error(`Mock D1 first() 不支持 SQL: ${normalized}`);
       },
 
       async all() {
+        if (/FROM users[\s\S]*ORDER BY COALESCE\(last_message_at[\s\S]*LIMIT 5/i.test(normalized)) {
+          const rows = [...(tables.get('users') || [])]
+            .sort((a, b) => Number(b.last_message_at || 0) - Number(a.last_message_at || 0))
+            .slice(0, 5);
+          return { results: rows.map(row => ({ ...row })) };
+        }
+        if (/FROM users[\s\S]*WHERE username LIKE \?/i.test(normalized)) {
+          const [like1] = bindings;
+          const needle = String(like1 || '').replace(/%/g, '').toLowerCase();
+          const rows = (tables.get('users') || []).filter(row => {
+            const u = String(row.username || '').toLowerCase();
+            const f = String(row.first_name || '').toLowerCase();
+            const l = String(row.last_name || '').toLowerCase();
+            return u.includes(needle) || f.includes(needle) || l.includes(needle);
+          }).slice(0, Number(bindings[3] || 10));
+          return { results: rows.map(row => ({ ...row })) };
+        }
         if (/^SELECT \* FROM rules WHERE enabled = 1 ORDER BY priority/i.test(normalized)) {
           const rows = [...(tables.get('rules') || [])]
             .filter(row => Number(row.enabled) === 1)

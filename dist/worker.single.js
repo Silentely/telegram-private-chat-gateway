@@ -668,6 +668,77 @@ function createD1Storage(db) {
         SET status = 'retryable', error_code = ?
         WHERE update_id = ?
       `).bind(String(errorCode || "temporary"), String(updateId)).run();
+    },
+    /**
+     * 系统信息统计（管理员 /sysinfo）
+     */
+    async getSystemStats() {
+      const [
+        users,
+        withTopic,
+        banned,
+        closed,
+        processing,
+        retryable,
+        links,
+        rules,
+        lastActive,
+        recentActive
+      ] = await Promise.all([
+        db.prepare("SELECT COUNT(*) AS total FROM users").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM users WHERE topic_id IS NOT NULL").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM users WHERE status = 'banned'").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM users WHERE status = 'closed'").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM processed_updates WHERE status = 'processing'").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM processed_updates WHERE status = 'retryable'").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM message_links").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM rules").first(),
+        db.prepare(`
+          SELECT user_id, username, first_name, last_name, last_message_at, topic_id, status
+          FROM users
+          ORDER BY COALESCE(last_message_at, 0) DESC
+          LIMIT 1
+        `).first(),
+        db.prepare(`
+          SELECT user_id, username, first_name, last_name, last_message_at, topic_id, status
+          FROM users
+          ORDER BY COALESCE(last_message_at, 0) DESC
+          LIMIT 5
+        `).all()
+      ]);
+      return {
+        usersTotal: Number(users?.total || 0),
+        usersWithTopic: Number(withTopic?.total || 0),
+        usersBanned: Number(banned?.total || 0),
+        usersClosed: Number(closed?.total || 0),
+        updatesProcessing: Number(processing?.total || 0),
+        updatesRetryable: Number(retryable?.total || 0),
+        messageLinks: Number(links?.total || 0),
+        rulesTotal: Number(rules?.total || 0),
+        lastActiveUser: lastActive ? mapUser(lastActive) : null,
+        recentActiveUsers: (recentActive?.results || []).map(mapUser)
+      };
+    },
+    /**
+     * 按 UID 精确或用户名/姓名模糊查找（管理员 /find）
+     */
+    async searchUsers(query, limit = 10) {
+      const q = String(query || "").trim();
+      if (!q) return [];
+      const lim = Math.min(Math.max(Number(limit) || 10, 1), 20);
+      if (/^\d{1,20}$/.test(q)) {
+        const one = await this.getUser(q);
+        return one ? [one] : [];
+      }
+      const like = `%${q.replace(/%/g, "")}%`;
+      const result = await db.prepare(`
+        SELECT user_id, username, first_name, last_name, last_message_at, topic_id, status, trust_level
+        FROM users
+        WHERE username LIKE ? OR first_name LIKE ? OR last_name LIKE ?
+        ORDER BY COALESCE(last_message_at, 0) DESC
+        LIMIT ?
+      `).bind(like, like, like, lim).all();
+      return (result.results || []).map(mapUser);
     }
   };
   return storage;
@@ -2119,7 +2190,9 @@ var CONFIG = {
   SPAM_SILENCE_MODE: false
   // 静默丢弃模式（不通知管理员）
 };
+var GATEWAY_VERSION = "1.0.0";
 var threadHealthCache = /* @__PURE__ */ new Map();
+var sysinfoKvCache = { ts: 0, data: null, ttlMs: 45e3 };
 var topicCreateInFlight = /* @__PURE__ */ new Map();
 var adminStatusCache = /* @__PURE__ */ new Map();
 var spamKeywordsCache = null;
@@ -2184,6 +2257,47 @@ async function getBlockedWords(env, forceRefresh = false) {
   return merged;
 }
 var Logger = createLogger();
+var RECENT_SYSTEM_ERRORS_MAX = 12;
+var recentSystemErrors = [];
+function recordSystemError(action, error, data = {}, env = null) {
+  const entry = {
+    ts: Date.now(),
+    action: String(action || "unknown"),
+    error: error instanceof Error ? error.message : String(error ?? ""),
+    userId: data?.userId != null ? String(data.userId) : void 0
+  };
+  recentSystemErrors.unshift(entry);
+  if (recentSystemErrors.length > RECENT_SYSTEM_ERRORS_MAX) {
+    recentSystemErrors.length = RECENT_SYSTEM_ERRORS_MAX;
+  }
+  if (env?.TOPIC_MAP) {
+    Promise.resolve().then(async () => {
+      let list = [];
+      try {
+        const raw = await env.TOPIC_MAP.get("sys:recent_errors");
+        if (raw) list = JSON.parse(raw);
+      } catch {
+        list = [];
+      }
+      if (!Array.isArray(list)) list = [];
+      list.unshift(entry);
+      await env.TOPIC_MAP.put(
+        "sys:recent_errors",
+        JSON.stringify(list.slice(0, RECENT_SYSTEM_ERRORS_MAX)),
+        { expirationTtl: 7 * 24 * 3600 }
+      );
+    }).catch(() => {
+    });
+  }
+}
+var _loggerError = Logger.error.bind(Logger);
+Logger.error = (action, error, data = {}) => {
+  try {
+    recordSystemError(action, error, data, data?.env || null);
+  } catch {
+  }
+  return _loggerError(action, error, data);
+};
 function ephemeralStore(env) {
   return createEphemeralStore(env.TOPIC_MAP);
 }
@@ -2305,6 +2419,87 @@ async function safeGetJSON(env, key, defaultValue = null) {
     return defaultValue;
   }
 }
+function isSparseTelegramFrom(from) {
+  if (!from || typeof from !== "object") return true;
+  const hasName = Boolean(String(from.first_name || "").trim() || String(from.last_name || "").trim());
+  const hasUsername = Boolean(String(from.username || "").trim());
+  return !hasName && !hasUsername;
+}
+async function saveUserProfileSnapshot(env, userId, from) {
+  if (!env?.TOPIC_MAP || !userId || isSparseTelegramFrom(from)) return;
+  try {
+    await env.TOPIC_MAP.put(`profile:${userId}`, JSON.stringify({
+      first_name: from.first_name || null,
+      last_name: from.last_name || null,
+      username: from.username || null,
+      saved_at: Date.now()
+    }), { expirationTtl: 30 * 24 * 3600 });
+  } catch (e) {
+    Logger.warn("profile_snapshot_save_failed", { userId, error: e?.message });
+  }
+}
+async function resolveUserFromForTopic(env, userId, from) {
+  if (!isSparseTelegramFrom(from)) {
+    return {
+      id: Number(from.id ?? userId),
+      first_name: from.first_name || "",
+      last_name: from.last_name || "",
+      username: from.username || ""
+    };
+  }
+  try {
+    const raw = await env.TOPIC_MAP?.get(`profile:${userId}`);
+    if (raw) {
+      const snap = JSON.parse(raw);
+      if (!isSparseTelegramFrom(snap)) {
+        return {
+          id: Number(userId),
+          first_name: snap.first_name || "",
+          last_name: snap.last_name || "",
+          username: snap.username || ""
+        };
+      }
+    }
+  } catch {
+  }
+  if (env.TG_BOT_DB) {
+    try {
+      const user = await createD1Storage(env.TG_BOT_DB).getUser(userId);
+      if (user && (user.firstName || user.lastName || user.username)) {
+        return {
+          id: Number(userId),
+          first_name: user.firstName || "",
+          last_name: user.lastName || "",
+          username: user.username || ""
+        };
+      }
+    } catch {
+    }
+  }
+  try {
+    const res = await tgCall(env, "getChat", { chat_id: userId });
+    if (res?.ok && res.result) {
+      const chat = res.result;
+      const resolved = {
+        id: Number(userId),
+        first_name: chat.first_name || "",
+        last_name: chat.last_name || "",
+        username: chat.username || ""
+      };
+      if (!isSparseTelegramFrom(resolved)) {
+        await saveUserProfileSnapshot(env, userId, resolved);
+        return resolved;
+      }
+    }
+  } catch {
+  }
+  return {
+    id: Number(from?.id ?? userId),
+    first_name: from?.first_name || "",
+    last_name: from?.last_name || "",
+    username: from?.username || ""
+  };
+}
 async function getOrCreateUserTopicRec(from, key, env, userId) {
   const existing = await safeGetJSON(env, key, null);
   if (existing && existing.thread_id) return existing;
@@ -2313,18 +2508,33 @@ async function getOrCreateUserTopicRec(from, key, env, userId) {
   const p = (async () => {
     const again = await safeGetJSON(env, key, null);
     if (again && again.thread_id) return again;
+    const resolvedFrom = await resolveUserFromForTopic(env, userId, from);
+    await saveUserProfileSnapshot(env, userId, resolvedFrom);
     const storage = createD1Storage(env.TG_BOT_DB);
     let user = await storage.getUser(userId);
     if (!user) {
       user = await storage.ensureUser({
         userId: String(userId),
-        username: from?.username ?? null,
-        firstName: from?.first_name ?? null,
-        lastName: from?.last_name ?? null
+        username: resolvedFrom?.username || null,
+        firstName: resolvedFrom?.first_name || null,
+        lastName: resolvedFrom?.last_name || null
       });
+    } else if (isSparseTelegramFrom({
+      first_name: user.firstName,
+      last_name: user.lastName,
+      username: user.username
+    }) && !isSparseTelegramFrom(resolvedFrom)) {
+      try {
+        await storage.updateUserState(userId, {
+          username: resolvedFrom.username || null,
+          firstName: resolvedFrom.first_name || null,
+          lastName: resolvedFrom.last_name || null
+        });
+      } catch {
+      }
     }
     if (user?.topicId) {
-      const rec = { thread_id: user.topicId, title: buildTopicTitle2(from), closed: false };
+      const rec = { thread_id: user.topicId, title: buildTopicTitle2(resolvedFrom), closed: false };
       await env.TOPIC_MAP.put(key, JSON.stringify(rec));
       await env.TOPIC_MAP.put(`thread:${user.topicId}`, String(userId));
       return rec;
@@ -2333,7 +2543,7 @@ async function getOrCreateUserTopicRec(from, key, env, userId) {
     const acquired = await storage.acquireTopicLock(userId, token, Date.now(), 3e4);
     if (acquired) {
       try {
-        const rec = await createTopic(from, key, env, userId);
+        const rec = await createTopic(resolvedFrom, key, env, userId);
         const saved = await storage.setTopic(userId, rec.thread_id, token, Date.now());
         if (!saved) throw new Error("Topic \u9501\u6240\u6709\u6743\u5DF2\u4E22\u5931");
         return rec;
@@ -2345,7 +2555,7 @@ async function getOrCreateUserTopicRec(from, key, env, userId) {
       await new Promise((resolve) => setTimeout(resolve, 150 + attempt * 75));
       const refreshed = await storage.getUser(userId);
       if (refreshed?.topicId) {
-        const rec = { thread_id: refreshed.topicId, title: buildTopicTitle2(from), closed: false };
+        const rec = { thread_id: refreshed.topicId, title: buildTopicTitle2(resolvedFrom), closed: false };
         await env.TOPIC_MAP.put(key, JSON.stringify(rec));
         await env.TOPIC_MAP.put(`thread:${refreshed.topicId}`, String(userId));
         return rec;
@@ -2844,6 +3054,7 @@ var legacyApp = {
         await env.TOPIC_MAP.delete(`turnstile_code:${code}`);
         await env.TOPIC_MAP.delete(`user_challenge:${userId}`);
         Logger.info("turnstile_verification_success", { userId });
+        await bumpDailyStat(normalizedEnv, "verifies", 1);
         const verifyMsgId = await env.TOPIC_MAP.get(`turnstile_msg:${code}`);
         ctx.waitUntil((async () => {
           if (verifyMsgId) {
@@ -2873,12 +3084,13 @@ var legacyApp = {
               ctx.waitUntil((async () => {
                 let forwardedCount = 0;
                 const limited = pendingIds.slice(0, CONFIG.PENDING_MAX_MESSAGES);
+                const topicFrom = await resolveUserFromForTopic(normalizedEnv, userId, null);
                 for (const pendingId of limited) {
                   if (!pendingId) continue;
                   const fakeMsg = {
                     message_id: pendingId,
                     chat: { id: Number(userId), type: "private" },
-                    from: { id: Number(userId) }
+                    from: topicFrom
                   };
                   try {
                     await forwardToTopic(fakeMsg, userId, `user:${userId}`, normalizedEnv, ctx);
@@ -2936,7 +3148,10 @@ var legacyApp = {
       return new Response("OK");
     }
     if (update.callback_query) {
-      if (String(update.callback_query.data || "").startsWith("v1:")) {
+      const cbData = String(update.callback_query.data || "");
+      if (cbData.startsWith("adm:")) {
+        await handleAdminUiCallback(update.callback_query, normalizedEnv, ctx);
+      } else if (cbData.startsWith("v1:")) {
         await createLegacyAdminService(normalizedEnv).handleCallbackQuery(update.callback_query);
       } else {
         await handleCallbackQuery(update.callback_query, normalizedEnv, ctx);
@@ -2952,7 +3167,27 @@ var legacyApp = {
     }
     if (msg.chat && msg.chat.type === "private") {
       try {
-        if (msg.text === "/start" || msg.text === "/cancel") {
+        const ptext = removeCommandBotSuffix((msg.text || "").trim());
+        if (ptext === "/help") {
+          await tgCall(normalizedEnv, "sendMessage", {
+            chat_id: msg.chat.id,
+            text: [
+              "\u{1F44B} <b>\u79C1\u804A\u7F51\u5173</b>",
+              "",
+              "\u76F4\u63A5\u53D1\u9001\u6587\u5B57/\u56FE\u7247/\u6587\u4EF6\u5373\u53EF\u8054\u7CFB\u7BA1\u7406\u5458\u3002",
+              "\u9996\u6B21\u4F7F\u7528\u53EF\u80FD\u9700\u8981\u5B8C\u6210\u4EBA\u673A\u9A8C\u8BC1\u3002",
+              "",
+              "\u5E38\u7528\uFF1A",
+              "\u2022 /start \u2014 \u5F00\u59CB\u6216\u91CD\u65B0\u89E6\u53D1\u9A8C\u8BC1",
+              "\u2022 /help \u2014 \u663E\u793A\u672C\u8BF4\u660E",
+              "",
+              "\u7BA1\u7406\u6307\u4EE4\u4EC5\u5728\u8D85\u7EA7\u7FA4\u8BDD\u9898\u5185\u7531\u7BA1\u7406\u5458\u4F7F\u7528\u3002"
+            ].join("\n"),
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+        if (ptext === "/start" || ptext === "/cancel") {
           const adminResult = await createLegacyAdminService(normalizedEnv).handlePrivateAdminMessage(msg);
           if (adminResult.status === "menu" || adminResult.status === "cancelled") {
             return new Response("OK");
@@ -2988,6 +3223,7 @@ var legacyApp = {
 async function handlePrivateMessage(msg, env, ctx) {
   const userId = msg.chat.id;
   const key = `user:${userId}`;
+  await saveUserProfileSnapshot(env, userId, msg.from);
   const rateLimit = await checkRateLimit(userId, env, "message", CONFIG.RATE_LIMIT_MESSAGE, CONFIG.RATE_LIMIT_WINDOW);
   if (!rateLimit.allowed) {
     await tgCall(env, "sendMessage", {
@@ -2999,8 +3235,9 @@ async function handlePrivateMessage(msg, env, ctx) {
   if (msg.text && msg.text.startsWith("/") && msg.text.trim() !== "/start") {
     return;
   }
-  const [isBanned, blockedWords, verification] = await Promise.all([
+  const [isBanned, isMuted, blockedWords, verification] = await Promise.all([
     env.TOPIC_MAP.get(`banned:${userId}`),
+    env.TOPIC_MAP.get(`muted:${userId}`),
     getBlockedWords(env),
     getVerificationState(env, userId)
   ]);
@@ -3021,7 +3258,36 @@ async function handlePrivateMessage(msg, env, ctx) {
     verification,
     rules: blockedRules
   });
-  if (policyResult.reason === "banned") return;
+  if (policyResult.reason === "banned") {
+    try {
+      const noticeKey = `ban_notice:${userId}`;
+      const noticed = await env.TOPIC_MAP.get(noticeKey);
+      if (!noticed) {
+        await tgCall(env, "sendMessage", {
+          chat_id: userId,
+          text: "\u{1F6AB} \u60A8\u5DF2\u88AB\u7BA1\u7406\u5458\u5C01\u7981\uFF0C\u6682\u65F6\u65E0\u6CD5\u7EE7\u7EED\u53D1\u9001\u6D88\u606F\u3002\u5982\u6709\u7591\u95EE\u8BF7\u7B49\u5F85\u7BA1\u7406\u5458\u5904\u7406\u3002"
+        });
+        await env.TOPIC_MAP.put(noticeKey, "1", { expirationTtl: 3600 });
+      }
+    } catch (e) {
+      Logger.warn("ban_notice_failed", { userId, error: e?.message });
+    }
+    return;
+  }
+  if (isMuted) {
+    try {
+      const noticeKey = `mute_notice:${userId}`;
+      if (!await env.TOPIC_MAP.get(noticeKey)) {
+        await tgCall(env, "sendMessage", {
+          chat_id: userId,
+          text: "\u{1F507} \u60A8\u5F53\u524D\u5904\u4E8E\u9759\u97F3\u72B6\u6001\uFF0C\u6D88\u606F\u4E0D\u4F1A\u9001\u8FBE\u7BA1\u7406\u5458\u3002\u8BF7\u7B49\u5F85\u7BA1\u7406\u5458\u53D6\u6D88\u9759\u97F3\u3002"
+        });
+        await env.TOPIC_MAP.put(noticeKey, "1", { expirationTtl: 3600 });
+      }
+    } catch {
+    }
+    return;
+  }
   if (policyResult.reason === "blocked_keyword") {
     const matchedIndex = Number(policyResult.matchedRuleId?.split(":")[1]);
     Logger.info("message_blocked_by_word", { userId, word: blockedWords[matchedIndex] });
@@ -3033,13 +3299,14 @@ async function handlePrivateMessage(msg, env, ctx) {
   }
   const spamResult = await spamCheck(msg, userId, env);
   if (spamResult.isSpam) {
+    await bumpDailyStat(env, "spam", 1);
     await handleSpamMessage(env, userId, msg, spamResult, void 0, ctx);
     return;
   }
   if (policyResult.action === "require_verification") {
     const isStart = msg.text && msg.text.trim() === "/start";
     const pendingMsgId = isStart ? null : msg.message_id;
-    await sendVerificationChallenge(userId, env, pendingMsgId);
+    await sendVerificationChallenge(userId, env, pendingMsgId, msg.from);
     return;
   }
   if (policyResult.autoReply) {
@@ -3051,12 +3318,13 @@ async function handlePrivateMessage(msg, env, ctx) {
     }
   }
   if (policyResult.action === "auto_reply_only") return;
+  await bumpDailyStat(env, "messages_in", 1);
   await forwardToTopic(msg, userId, key, env, ctx);
 }
 async function forwardToTopic(msg, userId, key, env, ctx) {
   const needsVerify = await env.TOPIC_MAP.get(`needs_verify:${userId}`);
   if (needsVerify) {
-    await sendVerificationChallenge(userId, env, msg.message_id || null);
+    await sendVerificationChallenge(userId, env, msg.message_id || null, msg.from);
     return;
   }
   let rec = await safeGetJSON(env, key, null);
@@ -3075,6 +3343,24 @@ async function forwardToTopic(msg, userId, key, env, ctx) {
     rec = await getOrCreateUserTopicRec(msg.from, key, env, userId);
     if (!rec || !rec.thread_id) {
       throw new Error("\u521B\u5EFA\u8BDD\u9898\u5931\u8D25");
+    }
+  } else if (!rec.title || rec.title === "User" || /^User @/i.test(rec.title)) {
+    try {
+      const resolvedFrom = await resolveUserFromForTopic(env, userId, msg.from);
+      const title = buildTopicTitle2(resolvedFrom);
+      if (title && title !== "User" && title !== rec.title) {
+        const edit = await tgCall(env, "editForumTopic", {
+          chat_id: env.SUPERGROUP_ID,
+          message_thread_id: rec.thread_id,
+          name: title
+        });
+        if (edit?.ok) {
+          rec.title = title;
+          await env.TOPIC_MAP.put(key, JSON.stringify(rec));
+        }
+      }
+    } catch (e) {
+      Logger.warn("topic_title_repair_failed", { userId, error: e?.message });
     }
   }
   if (rec.thread_id) {
@@ -3263,33 +3549,553 @@ async function handleAdminReply(msg, env, ctx) {
     });
   }
 }
+function isOwnerUser(env, userId) {
+  return parseIdAllowlist(env.OWNER_IDS).has(String(userId));
+}
+function buildUserActionKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [
+      [
+        { text: "\u{1F6AB} \u5C01\u7981", callback_data: `adm:u:ban:${id}` },
+        { text: "\u2705 \u89E3\u5C01", callback_data: `adm:u:unban:${id}` }
+      ],
+      [
+        { text: "\u{1F512} \u5173\u95ED", callback_data: `adm:u:close:${id}` },
+        { text: "\u{1F513} \u6253\u5F00", callback_data: `adm:u:open:${id}` }
+      ],
+      [
+        { text: "\u{1F31F} \u4FE1\u4EFB", callback_data: `adm:u:trust:${id}` },
+        { text: "\u{1F504} \u91CD\u7F6E\u9A8C\u8BC1", callback_data: `adm:u:reset:${id}` }
+      ],
+      [
+        { text: "\u{1F507} \u9759\u97F3", callback_data: `adm:u:mute:${id}` },
+        { text: "\u{1F50A} \u53D6\u6D88\u9759\u97F3", callback_data: `adm:u:unmute:${id}` }
+      ],
+      [
+        { text: "\u{1F464} \u5237\u65B0\u8D44\u6599", callback_data: `adm:u:info:${id}` },
+        { text: "\u{1F39B} \u9762\u677F", callback_data: `adm:u:panel:${id}` }
+      ]
+    ]
+  };
+}
+function buildSysinfoKeyboard(page = "overview") {
+  const mark = (p, label) => p === page ? `\u2022 ${label}` : label;
+  return {
+    inline_keyboard: [
+      [
+        { text: mark("overview", "\u6982\u89C8"), callback_data: "adm:sys:overview" },
+        { text: mark("storage", "\u5B58\u50A8"), callback_data: "adm:sys:storage" },
+        { text: mark("errors", "\u9519\u8BEF"), callback_data: "adm:sys:errors" }
+      ],
+      [
+        { text: "\u{1F504} \u5237\u65B0", callback_data: `adm:sys:${page}` },
+        { text: "\u{1F4CA} \u4ECA\u65E5", callback_data: "adm:sys:stats" }
+      ]
+    ]
+  };
+}
+async function bumpDailyStat(env, field, n = 1) {
+  if (!env?.TOPIC_MAP) return;
+  try {
+    const day = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    const key = `stats:${day}`;
+    let obj = {};
+    try {
+      const raw = await env.TOPIC_MAP.get(key);
+      if (raw) obj = JSON.parse(raw);
+    } catch {
+      obj = {};
+    }
+    if (!obj || typeof obj !== "object") obj = {};
+    obj[field] = Number(obj[field] || 0) + Number(n || 0);
+    obj.updated_at = Date.now();
+    await env.TOPIC_MAP.put(key, JSON.stringify(obj), { expirationTtl: 21 * 86400 });
+  } catch {
+  }
+}
+async function getDailyStats(env, day = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)) {
+  try {
+    const raw = await env.TOPIC_MAP.get(`stats:${day}`);
+    if (!raw) return { day, messages_in: 0, bans: 0, verifies: 0, spam: 0 };
+    const obj = JSON.parse(raw);
+    return {
+      day,
+      messages_in: Number(obj.messages_in || 0),
+      bans: Number(obj.bans || 0),
+      verifies: Number(obj.verifies || 0),
+      spam: Number(obj.spam || 0),
+      updated_at: obj.updated_at
+    };
+  } catch {
+    return { day, messages_in: 0, bans: 0, verifies: 0, spam: 0 };
+  }
+}
+async function resolveThreadIdForUser(env, userId) {
+  const rec = await safeGetJSON(env, `user:${userId}`, null);
+  if (rec?.thread_id) return rec.thread_id;
+  if (env.TG_BOT_DB) {
+    try {
+      const u = await createD1Storage(env.TG_BOT_DB).getUser(userId);
+      if (u?.topicId) return u.topicId;
+    } catch {
+    }
+  }
+  return null;
+}
 async function handleHelpCommand(env, threadId) {
-  const helpText = `\u{1F4CB} **\u6307\u4EE4\u5217\u8868**
+  const helpText = `\u{1F4CB} <b>\u6307\u4EE4\u5217\u8868</b> \xB7 v${GATEWAY_VERSION}
 
-**\u7528\u6237\u6307\u4EE4\uFF1A**
-/start - \u5F00\u59CB\u5BF9\u8BDD\uFF08\u89E6\u53D1\u9A8C\u8BC1\uFF09
-/help - \u663E\u793A\u6B64\u5E2E\u52A9\u4FE1\u606F
+<b>\u6743\u9650</b>
+\u2022 \u7FA4\u4E3B/\u7BA1\u7406\u5458 \u6216 <code>ADMIN_IDS</code> \u53EF\u7528\u7BA1\u7406\u6307\u4EE4
+\u2022 \u79C1\u804A\u7528\u6237\uFF1A<code>/start</code> <code>/help</code>
+\u2022 \u83DC\u5355\u9700 BotFather \u624B\u52A8\u6CE8\u518C\uFF1B\u770B\u89C1 \u2260 \u53EF\u7528
 
-**\u7BA1\u7406\u5458\u6307\u4EE4\uFF08\u8BDD\u9898\u5185\uFF09\uFF1A**
-/close - \u5173\u95ED\u5BF9\u8BDD
-/open - \u6062\u590D\u5BF9\u8BDD
-/reset - \u91CD\u7F6E\u7528\u6237\u9A8C\u8BC1
-/trust - \u8BBE\u7F6E\u6C38\u4E45\u4FE1\u4EFB
-/ban - \u5C01\u7981\u7528\u6237
-/unban - \u89E3\u5C01\u7528\u6237
-/info - \u67E5\u770B\u7528\u6237\u4FE1\u606F
-/cleanup - \u6E05\u7406\u65E0\u6548\u8BDD\u9898
+<b>\u5168\u5C40</b>
+/help \xB7 /sysinfo \xB7 /stats \xB7 /whoami \xB7 /find \u5173\u952E\u8BCD
+/cleanup \xB7 /listwords \xB7 /addword \xB7 /delword
+/synccommands <i>(\u4EC5 OWNER_IDS)</i>
 
-**\u5C4F\u853D\u8BCD\u7BA1\u7406\uFF1A**
-/addword \u8BCD - \u6DFB\u52A0\u5C4F\u853D\u8BCD
-/delword \u8BCD - \u5220\u9664\u5C4F\u853D\u8BCD
-/listwords - \u67E5\u770B\u5C4F\u853D\u8BCD\u5217\u8868
+<b>\u7528\u6237\u8BDD\u9898\u5185</b>
+/panel \xB7 /info \xB7 /note \u5907\u6CE8
+/ban \xB7 /unban \xB7 /close \xB7 /open \xB7 /mute \xB7 /unmute
+/trust \xB7 /reset
 
-**\u5173\u4E8E\uFF1A**
-\u2022 \u79C1\u804A\u673A\u5668\u4EBA\u53D1\u9001\u6D88\u606F\uFF0C\u7BA1\u7406\u5458\u5728\u8BDD\u9898\u5185\u56DE\u590D
-\u2022 \u652F\u6301\u6587\u672C\u3001\u56FE\u7247\u3001\u89C6\u9891\u3001\u6587\u6863\u7B49\u591A\u79CD\u6D88\u606F\u7C7B\u578B
-\u2022 \u5185\u7F6E\u4EBA\u673A\u9A8C\u8BC1\u548C\u5783\u573E\u5185\u5BB9\u8FC7\u6EE4`;
-  await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: helpText, parse_mode: "Markdown" });
+\u70B9 <code>/panel</code> \u53EF\u7528\u6309\u94AE\u64CD\u4F5C\uFF0C\u65E0\u9700\u8BB0\u547D\u4EE4\u3002`;
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: helpText,
+    parse_mode: "HTML"
+  });
+}
+function formatSysTime(ts) {
+  if (ts == null || ts === "" || Number(ts) <= 0) return "\u65E0";
+  try {
+    return new Date(Number(ts)).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  } catch {
+    return String(ts);
+  }
+}
+async function countKvPrefix(env, prefix) {
+  if (!env?.TOPIC_MAP?.list) return null;
+  let total = 0;
+  let cursor;
+  let pages = 0;
+  const maxPages = 20;
+  do {
+    const result = await env.TOPIC_MAP.list({ prefix, cursor, limit: 1e3 });
+    total += (result.keys || []).length;
+    cursor = result.list_complete ? void 0 : result.cursor;
+    pages += 1;
+  } while (cursor && pages < maxPages);
+  return { total, truncated: Boolean(cursor) };
+}
+async function collectRecentErrors(env) {
+  let kvErrors = [];
+  try {
+    if (env?.TOPIC_MAP) {
+      const raw = await env.TOPIC_MAP.get("sys:recent_errors");
+      if (raw) kvErrors = JSON.parse(raw);
+    }
+  } catch {
+    kvErrors = [];
+  }
+  if (!Array.isArray(kvErrors)) kvErrors = [];
+  const merged = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of [...recentSystemErrors, ...kvErrors]) {
+    if (!item || typeof item !== "object") continue;
+    const key = `${item.ts}|${item.action}|${item.error}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  merged.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+  return merged.slice(0, 8);
+}
+async function getCachedKvPrefixCounts(env) {
+  const now = Date.now();
+  if (sysinfoKvCache.data && now - sysinfoKvCache.ts < sysinfoKvCache.ttlMs) {
+    return sysinfoKvCache.data;
+  }
+  const prefixes = [
+    ["user:", "\u7528\u6237\u4F1A\u8BDD"],
+    ["thread:", "\u8BDD\u9898\u53CD\u67E5"],
+    ["banned:", "\u5C01\u7981"],
+    ["muted:", "\u9759\u97F3"],
+    ["profile:", "\u8D44\u6599\u5FEB\u7167"],
+    ["note:", "\u5907\u6CE8"],
+    ["chal:", "\u9A8C\u8BC1\u6311\u6218"],
+    ["turnstile_code:", "Turnstile"],
+    ["pending_turnstile:", "\u5F85\u8F6C\u53D1"],
+    ["stats:", "\u65E5\u7EDF\u8BA1"],
+    ["sys:", "\u7CFB\u7EDF\u952E"]
+  ];
+  const rows = [];
+  for (const [prefix, label] of prefixes) {
+    const c = await countKvPrefix(env, prefix);
+    rows.push({ prefix, label, ...c || { total: 0, truncated: false } });
+  }
+  sysinfoKvCache.ts = now;
+  sysinfoKvCache.data = rows;
+  return rows;
+}
+async function buildSysinfoPageText(env, page = "overview") {
+  const started = Date.now();
+  const hasKv = Boolean(env.TOPIC_MAP && typeof env.TOPIC_MAP.get === "function");
+  const hasD1 = Boolean(env.TG_BOT_DB && typeof env.TG_BOT_DB.prepare === "function");
+  const baseUrl = String(env.VERIFICATION_PAGE_URL || "").replace(/\/$/, "") || "(\u672A\u914D\u7F6E VERIFICATION_PAGE_URL)";
+  const turnstileOn = !!(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY && env.VERIFICATION_PAGE_URL);
+  const lines = [];
+  if (page === "overview" || page === "stats") {
+    lines.push(`\u{1F5A5} <b>\u7CFB\u7EDF \xB7 ${page === "stats" ? "\u4ECA\u65E5\u7EDF\u8BA1" : "\u6982\u89C8"}</b> \xB7 v${GATEWAY_VERSION}`);
+    lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
+    lines.push(`\u72B6\u6001: <b>\u8FD0\u884C\u4E2D</b>`);
+    lines.push(`KV: ${hasKv ? "\u2705" : "\u274C"} \xB7 D1: ${hasD1 ? "\u2705" : "\u274C"} \xB7 \u9A8C\u8BC1: ${turnstileOn ? "Turnstile" : "\u672C\u5730\u9898\u5E93"}`);
+    lines.push(`OWNER \u5DF2\u914D: ${parseIdAllowlist(env.OWNER_IDS).size > 0 ? "\u2705" : "\u26AA"} \xB7 SUPERGROUP: ${String(env.SUPERGROUP_ID || "").startsWith("-100") ? "\u2705" : "\u274C"}`);
+    lines.push("");
+    if (hasD1) {
+      try {
+        await ensureMigrations(env.TG_BOT_DB);
+        const stats = await createD1Storage(env.TG_BOT_DB).getSystemStats();
+        lines.push(`\u{1F4CA} \u4F1A\u8BDD <b>${stats.usersTotal}</b> \u7528\u6237 \xB7 Topic ${stats.usersWithTopic} \xB7 \u5C01\u7981 ${stats.usersBanned} \xB7 \u5173\u95ED ${stats.usersClosed || 0}`);
+        lines.push(`\u{1F5C2} \u6620\u5C04 ${stats.messageLinks} \xB7 \u89C4\u5219 ${stats.rulesTotal} \xB7 \u5904\u7406\u4E2D ${stats.updatesProcessing} \xB7 \u53EF\u91CD\u8BD5 ${stats.updatesRetryable}`);
+        const recent = stats.recentActiveUsers?.length ? stats.recentActiveUsers : stats.lastActiveUser ? [stats.lastActiveUser] : [];
+        if (recent.length) {
+          lines.push("");
+          lines.push("<b>\u6700\u8FD1\u6D3B\u8DC3</b>");
+          for (const u of recent.slice(0, 5)) {
+            const name = escapeHtml([u.firstName, u.lastName].filter(Boolean).join(" ").trim() || "\u672A\u77E5");
+            const un = u.username ? `@${escapeHtml(u.username)}` : "\u65E0\u7528\u6237\u540D";
+            lines.push(`\u2022 ${name} \xB7 ${un} \xB7 <code>${escapeHtml(u.userId)}</code> \xB7 ${formatSysTime(u.lastMessageAt)}`);
+          }
+        } else {
+          lines.push("\u6700\u8FD1\u6D3B\u8DC3: \u6682\u65E0");
+        }
+        if (stats.updatesProcessing > 20) {
+          lines.push("");
+          lines.push("\u26A0\uFE0F Update \u5904\u7406\u4E2D\u6570\u91CF\u504F\u9AD8\uFF0C\u8BF7\u68C0\u67E5 Webhook \u662F\u5426\u6301\u7EED 5xx");
+        }
+      } catch (e) {
+        recordSystemError("sysinfo_d1_failed", e, {}, env);
+        lines.push(`D1 \u8BFB\u53D6\u5931\u8D25: ${escapeHtml(e?.message || String(e))}`);
+      }
+    } else {
+      lines.push("D1 \u672A\u7ED1\u5B9A\uFF0C\u65E0\u6CD5\u663E\u793A\u4F1A\u8BDD\u7EDF\u8BA1");
+    }
+    if (page === "stats") {
+      const today = await getDailyStats(env);
+      lines.push("");
+      lines.push(`<b>\u4ECA\u65E5 ${escapeHtml(today.day)}</b>`);
+      lines.push(`\u2022 \u5165\u7AD9\u6D88\u606F: <b>${today.messages_in}</b>`);
+      lines.push(`\u2022 \u9A8C\u8BC1\u901A\u8FC7: ${today.verifies}`);
+      lines.push(`\u2022 \u5C01\u7981\u6B21\u6570: ${today.bans}`);
+      lines.push(`\u2022 \u5783\u573E\u62E6\u622A: ${today.spam}`);
+    }
+    lines.push("");
+    lines.push("<b>\u7AEF\u70B9</b>");
+    lines.push(`<code>GET ${escapeHtml(baseUrl)}/health</code>`);
+    lines.push(`<code>GET \u2026/health/env</code> \xB7 <code>/health/d1</code> \xB7 <code>/verify</code>`);
+    lines.push(`<code>POST ${escapeHtml(baseUrl)}/</code> Webhook`);
+  }
+  if (page === "storage") {
+    lines.push(`\u{1F5C4} <b>\u7CFB\u7EDF \xB7 \u5B58\u50A8</b> \xB7 v${GATEWAY_VERSION}`);
+    lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
+    if (hasD1) {
+      try {
+        const stats = await createD1Storage(env.TG_BOT_DB).getSystemStats();
+        lines.push("<b>D1</b>");
+        lines.push(`\u2022 users: ${stats.usersTotal} (topic ${stats.usersWithTopic})`);
+        lines.push(`\u2022 banned ${stats.usersBanned} \xB7 closed ${stats.usersClosed || 0}`);
+        lines.push(`\u2022 message_links ${stats.messageLinks} \xB7 rules ${stats.rulesTotal}`);
+        lines.push(`\u2022 processed processing/retryable: ${stats.updatesProcessing}/${stats.updatesRetryable}`);
+      } catch (e) {
+        lines.push(`D1: ${escapeHtml(e?.message || String(e))}`);
+      }
+    } else lines.push("D1: \u672A\u7ED1\u5B9A");
+    lines.push("");
+    lines.push("<b>KV \u524D\u7F00</b>");
+    if (hasKv) {
+      try {
+        const rows = await getCachedKvPrefixCounts(env);
+        for (const r of rows) {
+          lines.push(`\u2022 ${r.label} <code>${r.prefix}</code> ${r.total}${r.truncated ? "+" : ""}`);
+        }
+        lines.push("<i>\u8BA1\u6570\u7F13\u5B58\u7EA6 45s</i>");
+      } catch (e) {
+        lines.push(`KV: ${escapeHtml(e?.message || String(e))}`);
+      }
+    } else lines.push("KV: \u672A\u7ED1\u5B9A");
+  }
+  if (page === "errors") {
+    lines.push(`\u26A0\uFE0F <b>\u7CFB\u7EDF \xB7 \u6700\u8FD1\u9519\u8BEF</b> \xB7 v${GATEWAY_VERSION}`);
+    lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
+    const top = await collectRecentErrors(env);
+    if (!top.length) {
+      lines.push("\u6682\u65E0\u8BB0\u5F55\u3002");
+      lines.push("<i>\u51B7\u542F\u52A8\u540E\u5185\u5B58\u7F13\u51B2\u4F1A\u6E05\u7A7A\uFF1B\u6210\u529F\u8DEF\u5F84\u4E0D\u8BB0\u5165\u3002</i>");
+    } else {
+      for (const err of top) {
+        const when = formatSysTime(err.ts);
+        const act = escapeHtml(err.action || "?");
+        const msg = escapeHtml(String(err.error || "").slice(0, 140));
+        const uid = err.userId ? ` uid=${escapeHtml(err.userId)}` : "";
+        lines.push(`\u2022 <code>${when}</code>`);
+        lines.push(`  [${act}]${uid} ${msg}`);
+      }
+    }
+  }
+  lines.push("");
+  lines.push(`\u23F1 ${Date.now() - started} ms`);
+  let text = lines.join("\n");
+  if (text.length > 3500) text = `${text.slice(0, 3500)}
+\u2026`;
+  return text;
+}
+async function handleSysinfoCommand(env, threadId, opts = {}) {
+  const page = opts.page || "overview";
+  const text = await buildSysinfoPageText(env, page);
+  const markup = buildSysinfoKeyboard(page === "stats" ? "overview" : page);
+  if (opts.edit?.chatId && opts.edit?.messageId) {
+    const res = await tgCall(env, "editMessageText", {
+      chat_id: opts.edit.chatId,
+      message_id: opts.edit.messageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: markup
+    });
+    if (!res?.ok) {
+      await tgCall(env, "sendMessage", {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: markup
+      });
+    }
+    return;
+  }
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: markup
+  });
+}
+async function handleStatsCommand(env, threadId) {
+  await handleSysinfoCommand(env, threadId, { page: "stats" });
+}
+async function handleWhoamiCommand(env, threadId, senderId) {
+  const admin = await isAdminUser(env, senderId);
+  const owner = isOwnerUser(env, senderId);
+  let member = "unknown";
+  try {
+    const res = await tgCall(env, "getChatMember", {
+      chat_id: env.SUPERGROUP_ID,
+      user_id: senderId
+    });
+    member = res.result?.status || res.description || "unknown";
+  } catch {
+  }
+  const text = [
+    "\u{1FAAA} <b>Whoami</b>",
+    `UID: <code>${senderId}</code>`,
+    `\u7FA4\u8EAB\u4EFD: <code>${escapeHtml(member)}</code>`,
+    `\u7BA1\u7406\u6307\u4EE4\u6743\u9650: ${admin ? "\u2705 \u662F" : "\u274C \u5426"}`,
+    `OWNER_IDS: ${owner ? "\u2705 \u662F" : "\u274C \u5426"}`
+  ].join("\n");
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text,
+    parse_mode: "HTML"
+  });
+}
+async function handleFindCommand(env, threadId, queryText) {
+  const q = queryText.replace(/^\/find(@\w+)?\s*/i, "").trim();
+  if (!q) {
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: "\u7528\u6CD5: <code>/find UID\u6216\u7528\u6237\u540D\u6216\u59D3\u540D</code>",
+      parse_mode: "HTML"
+    });
+    return;
+  }
+  if (!env.TG_BOT_DB) {
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: "\u274C D1 \u672A\u7ED1\u5B9A\uFF0C\u65E0\u6CD5\u641C\u7D22"
+    });
+    return;
+  }
+  try {
+    await ensureMigrations(env.TG_BOT_DB);
+    const hits = await createD1Storage(env.TG_BOT_DB).searchUsers(q, 10);
+    if (!hits.length) {
+      await tgCall(env, "sendMessage", {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: `\u672A\u627E\u5230\u5339\u914D\u300C${escapeHtml(q)}\u300D\u7684\u7528\u6237`,
+        parse_mode: "HTML"
+      });
+      return;
+    }
+    const lines = [`\u{1F50E} <b>\u67E5\u627E\u7ED3\u679C</b> \xB7 ${hits.length} \u6761`, ""];
+    for (const u of hits) {
+      const name = escapeHtml([u.firstName, u.lastName].filter(Boolean).join(" ").trim() || "\u672A\u77E5");
+      const un = u.username ? `@${escapeHtml(u.username)}` : "\u65E0\u7528\u6237\u540D";
+      lines.push(`\u2022 ${name} \xB7 ${un}`);
+      lines.push(`  UID <code>${escapeHtml(u.userId)}</code> \xB7 Topic <code>${escapeHtml(u.topicId || "-")}</code> \xB7 ${escapeHtml(u.status || "?")}`);
+      lines.push(`  \u6700\u8FD1: ${formatSysTime(u.lastMessageAt)}`);
+    }
+    lines.push("", "<i>\u8BF7\u5230\u5BF9\u5E94\u7528\u6237 Forum Topic \u5185\u4F7F\u7528 /panel \u64CD\u4F5C</i>");
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: lines.join("\n"),
+      parse_mode: "HTML"
+    });
+  } catch (e) {
+    recordSystemError("find_failed", e, {}, env);
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: `\u274C \u641C\u7D22\u5931\u8D25: ${escapeHtml(e?.message || String(e))}`,
+      parse_mode: "HTML"
+    });
+  }
+}
+async function handleSyncCommandsCommand(env, threadId, senderId) {
+  if (!isOwnerUser(env, senderId)) {
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: "\u274C \u4EC5 <code>OWNER_IDS</code> \u53EF\u540C\u6B65 Bot \u547D\u4EE4\u83DC\u5355",
+      parse_mode: "HTML"
+    });
+    return;
+  }
+  const commands = [
+    { command: "start", description: "\u5F00\u59CB\u5BF9\u8BDD" },
+    { command: "help", description: "\u5E2E\u52A9" },
+    { command: "sysinfo", description: "\u7CFB\u7EDF\u4FE1\u606F" },
+    { command: "stats", description: "\u4ECA\u65E5\u7EDF\u8BA1" },
+    { command: "panel", description: "\u7528\u6237\u5FEB\u6377\u9762\u677F" },
+    { command: "info", description: "\u7528\u6237\u8D44\u6599" },
+    { command: "find", description: "\u67E5\u627E\u7528\u6237" },
+    { command: "whoami", description: "\u67E5\u770B\u6211\u7684\u6743\u9650" },
+    { command: "ban", description: "\u5C01\u7981\u7528\u6237" },
+    { command: "unban", description: "\u89E3\u5C01\u7528\u6237" },
+    { command: "close", description: "\u5173\u95ED\u5BF9\u8BDD" },
+    { command: "open", description: "\u6253\u5F00\u5BF9\u8BDD" },
+    { command: "listwords", description: "\u5C4F\u853D\u8BCD\u5217\u8868" },
+    { command: "synccommands", description: "\u540C\u6B65\u547D\u4EE4\u83DC\u5355" }
+  ];
+  const res = await tgCall(env, "setMyCommands", { commands });
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: res?.ok ? `\u2705 \u5DF2\u540C\u6B65 ${commands.length} \u6761\u547D\u4EE4\u5230 Bot \u83DC\u5355` : `\u274C \u540C\u6B65\u5931\u8D25: ${escapeHtml(res?.description || "unknown")}`,
+    parse_mode: "HTML"
+  });
+}
+async function handlePanelCommand(env, threadId, userId) {
+  const from = await resolveUserFromForTopic(env, userId, null);
+  const name = escapeHtml([from.first_name, from.last_name].filter(Boolean).join(" ").trim() || "\u672A\u77E5");
+  const un = from.username ? `@${escapeHtml(from.username)}` : "\u65E0\u7528\u6237\u540D";
+  const text = [
+    "\u{1F39B} <b>\u7528\u6237\u64CD\u4F5C\u9762\u677F</b>",
+    `\u7528\u6237: ${name} \xB7 ${un}`,
+    `UID: <code>${userId}</code>`,
+    "",
+    "\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\u6267\u884C\u64CD\u4F5C\uFF08\u65E0\u9700\u8BB0\u5FC6\u547D\u4EE4\uFF09"
+  ].join("\n");
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text,
+    parse_mode: "HTML",
+    reply_markup: buildUserActionKeyboard(userId)
+  });
+}
+async function handleMuteCommand(env, threadId, userId) {
+  await env.TOPIC_MAP.put(`muted:${userId}`, "1");
+  if (env.TG_BOT_DB) {
+    try {
+      await createD1Storage(env.TG_BOT_DB).updateUserState(userId, { isMuted: true });
+    } catch {
+    }
+  }
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: "\u{1F507} <b>\u5DF2\u9759\u97F3</b>\uFF1A\u7528\u6237\u6D88\u606F\u4E0D\u518D\u8F6C\u53D1\u5230\u672C\u7FA4",
+    parse_mode: "HTML"
+  });
+  await tgCall(env, "sendMessage", {
+    chat_id: userId,
+    text: "\u{1F507} \u60A8\u5DF2\u88AB\u7BA1\u7406\u5458\u9759\u97F3\uFF0C\u6D88\u606F\u6682\u65F6\u4E0D\u4F1A\u9001\u8FBE\u7BA1\u7406\u5458\u3002"
+  });
+}
+async function handleUnmuteCommand(env, threadId, userId) {
+  await env.TOPIC_MAP.delete(`muted:${userId}`);
+  await env.TOPIC_MAP.delete(`mute_notice:${userId}`);
+  if (env.TG_BOT_DB) {
+    try {
+      await createD1Storage(env.TG_BOT_DB).updateUserState(userId, { isMuted: false });
+    } catch {
+    }
+  }
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: "\u{1F50A} <b>\u5DF2\u53D6\u6D88\u9759\u97F3</b>",
+    parse_mode: "HTML"
+  });
+  await tgCall(env, "sendMessage", {
+    chat_id: userId,
+    text: "\u{1F50A} \u60A8\u7684\u9759\u97F3\u5DF2\u53D6\u6D88\uFF0C\u53EF\u4EE5\u7EE7\u7EED\u8054\u7CFB\u7BA1\u7406\u5458\u3002"
+  });
+}
+async function handleNoteCommand(env, threadId, userId, text) {
+  const note = text.replace(/^\/note(@\w+)?\s*/i, "").trim();
+  if (!note) {
+    const existing = await env.TOPIC_MAP.get(`note:${userId}`);
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: existing ? `\u{1F4DD} <b>\u5F53\u524D\u5907\u6CE8</b>
+${escapeHtml(existing)}
+
+\u7528\u6CD5: <code>/note \u65B0\u5907\u6CE8</code>\uFF08\u53D1 <code>/note clear</code> \u6E05\u7A7A\uFF09` : "\u{1F4DD} \u6682\u65E0\u5907\u6CE8\u3002\u7528\u6CD5: <code>/note \u5185\u5BB9</code>",
+      parse_mode: "HTML"
+    });
+    return;
+  }
+  if (note.toLowerCase() === "clear" || note === "-" || note === "\u6E05\u9664") {
+    await env.TOPIC_MAP.delete(`note:${userId}`);
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: "\u2705 \u5907\u6CE8\u5DF2\u6E05\u9664"
+    });
+    return;
+  }
+  await env.TOPIC_MAP.put(`note:${userId}`, note.slice(0, 500), { expirationTtl: 365 * 86400 });
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: `\u2705 \u5907\u6CE8\u5DF2\u4FDD\u5B58\uFF1A
+${escapeHtml(note.slice(0, 500))}`,
+    parse_mode: "HTML"
+  });
 }
 async function handleAddWordCommand(env, threadId, text, senderId) {
   const word = text.slice(9).trim();
@@ -3413,32 +4219,214 @@ async function handleTrustCommand(env, threadId, userId) {
 }
 async function handleBanCommand(env, threadId, userId) {
   await env.TOPIC_MAP.put(`banned:${userId}`, "1");
-  await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "\u{1F6AB} **\u7528\u6237\u5DF2\u5C01\u7981**", parse_mode: "Markdown" });
+  if (env.TG_BOT_DB) {
+    try {
+      await createD1Storage(env.TG_BOT_DB).updateUserState(userId, { status: "banned" });
+    } catch (e) {
+      Logger.warn("ban_d1_update_failed", { userId, error: e?.message });
+    }
+  }
+  await bumpDailyStat(env, "bans", 1);
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: "\u{1F6AB} **\u7528\u6237\u5DF2\u5C01\u7981**\uFF08\u5DF2\u5C1D\u8BD5\u901A\u77E5\u5BF9\u65B9\uFF09",
+    parse_mode: "Markdown"
+  });
+  const notify = await tgCall(env, "sendMessage", {
+    chat_id: userId,
+    text: "\u{1F6AB} \u60A8\u5DF2\u88AB\u7BA1\u7406\u5458\u5C01\u7981\uFF0C\u6682\u65F6\u65E0\u6CD5\u7EE7\u7EED\u53D1\u9001\u6D88\u606F\u3002\u5982\u6709\u7591\u95EE\u8BF7\u7B49\u5F85\u7BA1\u7406\u5458\u5904\u7406\u3002"
+  });
+  if (!notify?.ok) {
+    Logger.warn("ban_user_notify_failed", {
+      userId,
+      description: notify?.description
+    });
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: `\u26A0\uFE0F \u5DF2\u5C01\u7981\uFF0C\u4F46\u901A\u77E5\u7528\u6237\u5931\u8D25\uFF08\u53EF\u80FD\u5BF9\u65B9\u672A\u79C1\u804A\u8FC7\u673A\u5668\u4EBA\u6216\u5DF2\u62C9\u9ED1\uFF09\uFF1A${notify?.description || "unknown"}`
+    });
+  } else {
+    await env.TOPIC_MAP.put(`ban_notice:${userId}`, "1", { expirationTtl: 3600 });
+  }
 }
 async function handleUnbanCommand(env, threadId, userId) {
   await env.TOPIC_MAP.delete(`banned:${userId}`);
-  await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "\u2705 **\u7528\u6237\u5DF2\u89E3\u5C01**", parse_mode: "Markdown" });
+  await env.TOPIC_MAP.delete(`ban_notice:${userId}`);
+  if (env.TG_BOT_DB) {
+    try {
+      await createD1Storage(env.TG_BOT_DB).updateUserState(userId, { status: "active" });
+    } catch (e) {
+      Logger.warn("unban_d1_update_failed", { userId, error: e?.message });
+    }
+  }
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: "\u2705 **\u7528\u6237\u5DF2\u89E3\u5C01**\uFF08\u5DF2\u5C1D\u8BD5\u901A\u77E5\u5BF9\u65B9\uFF09",
+    parse_mode: "Markdown"
+  });
+  const notify = await tgCall(env, "sendMessage", {
+    chat_id: userId,
+    text: "\u2705 \u60A8\u5DF2\u88AB\u7BA1\u7406\u5458\u89E3\u5C01\uFF0C\u53EF\u4EE5\u7EE7\u7EED\u53D1\u9001\u6D88\u606F\u4E86\u3002"
+  });
+  if (!notify?.ok) {
+    Logger.warn("unban_user_notify_failed", {
+      userId,
+      description: notify?.description
+    });
+  }
 }
 async function handleInfoCommand(env, threadId, userId) {
   const userKey = `user:${userId}`;
-  const userRec = await safeGetJSON(env, userKey, null);
+  let userRec = await safeGetJSON(env, userKey, null);
   const verifyStatus = await getVerificationState(env, userId);
   const banStatus = await env.TOPIC_MAP.get(`banned:${userId}`);
-  const info = `\u{1F464} **\u7528\u6237\u4FE1\u606F**
-UID: \`${userId}\`
-Topic ID: \`${threadId}\`
-\u8BDD\u9898\u6807\u9898: ${userRec?.title || "\u672A\u77E5"}
-\u9A8C\u8BC1\u72B6\u6001: ${verifyStatus ? verifyStatus.type === "trusted" ? "\u{1F31F} \u6C38\u4E45\u4FE1\u4EFB" : "\u2705 \u5DF2\u9A8C\u8BC1" : "\u274C \u672A\u9A8C\u8BC1"}
-\u5C01\u7981\u72B6\u6001: ${banStatus ? "\u{1F6AB} \u5DF2\u5C01\u7981" : "\u2705 \u6B63\u5E38"}
-Link: [\u70B9\u51FB\u79C1\u804A](tg://user?id=${userId})`;
-  await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: info, parse_mode: "Markdown" });
+  const from = await resolveUserFromForTopic(env, userId, null);
+  const resolvedTitle = buildTopicTitle2(from);
+  if (userRec?.thread_id && resolvedTitle && resolvedTitle !== "User" && (!userRec.title || userRec.title === "User" || /^User(\s@|$)/i.test(userRec.title))) {
+    try {
+      const edit = await tgCall(env, "editForumTopic", {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: userRec.thread_id,
+        name: resolvedTitle
+      });
+      if (edit?.ok) {
+        userRec = { ...userRec, title: resolvedTitle };
+        await env.TOPIC_MAP.put(userKey, JSON.stringify(userRec));
+      }
+    } catch (e) {
+      Logger.warn("info_topic_title_repair_failed", { userId, error: e?.message });
+    }
+  }
+  const displayName = escapeHtml(
+    [from.first_name, from.last_name].filter(Boolean).join(" ").trim() || "\u672A\u77E5"
+  );
+  const usernameText = from.username ? `@${escapeHtml(from.username)}` : "\u65E0";
+  const openLink = from.username ? `<a href="https://t.me/${escapeHtml(from.username)}">\u6253\u5F00\u4E3B\u9875 @${escapeHtml(from.username)}</a>` : `<a href="tg://user?id=${userId}">\u6253\u5F00\u7528\u6237\u8D44\u6599</a>`;
+  const topicTitle = escapeHtml(userRec?.title || resolvedTitle || "\u672A\u77E5");
+  const verifyText = verifyStatus ? verifyStatus.type === "trusted" ? "\u{1F31F} \u6C38\u4E45\u4FE1\u4EFB" : "\u2705 \u5DF2\u9A8C\u8BC1" : "\u274C \u672A\u9A8C\u8BC1";
+  const banText = banStatus ? "\u{1F6AB} \u5DF2\u5C01\u7981" : "\u2705 \u6B63\u5E38";
+  const muted = await env.TOPIC_MAP.get(`muted:${userId}`);
+  const note = await env.TOPIC_MAP.get(`note:${userId}`);
+  let lastMsgAt = null;
+  let d1Status = null;
+  if (env.TG_BOT_DB) {
+    try {
+      const u = await createD1Storage(env.TG_BOT_DB).getUser(userId);
+      lastMsgAt = u?.lastMessageAt ?? null;
+      d1Status = u?.status ?? null;
+    } catch {
+    }
+  }
+  const info = [
+    "\u{1F464} <b>\u7528\u6237\u4FE1\u606F</b>",
+    `\u59D3\u540D: ${displayName}`,
+    `\u7528\u6237\u540D: ${usernameText}`,
+    `UID: <code>${userId}</code>`,
+    `Topic ID: <code>${threadId}</code>`,
+    `\u8BDD\u9898\u6807\u9898: ${topicTitle}`,
+    `\u9A8C\u8BC1: ${verifyText}`,
+    `\u5C01\u7981: ${banText} \xB7 \u9759\u97F3: ${muted ? "\u{1F507} \u662F" : "\u5426"} \xB7 \u4F1A\u8BDD\u5173\u95ED: ${userRec?.closed ? "\u662F" : "\u5426"}`,
+    d1Status ? `D1 \u72B6\u6001: <code>${escapeHtml(d1Status)}</code>` : "",
+    `\u6700\u8FD1\u6D88\u606F: ${formatSysTime(lastMsgAt)}`,
+    note ? `\u5907\u6CE8: ${escapeHtml(note)}` : "\u5907\u6CE8: \u65E0\uFF08/note \u5185\u5BB9\uFF09",
+    `\u94FE\u63A5: ${openLink}`,
+    from.username ? "" : "<i>\u65E0\u516C\u5F00\u7528\u6237\u540D\u65F6\u90E8\u5206\u5BA2\u6237\u7AEF\u65E0\u6CD5\u70B9\u51FB tg \u94FE\u63A5</i>"
+  ].filter(Boolean).join("\n");
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text: info,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: buildUserActionKeyboard(userId)
+  });
+}
+async function handleAdminUiCallback(query, env, ctx) {
+  const data = String(query.data || "");
+  const senderId = query.from?.id;
+  if (!senderId || !await isAdminUser(env, senderId)) {
+    await tgCall(env, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: "\u65E0\u6743\u9650",
+      show_alert: true
+    });
+    return;
+  }
+  const threadId = query.message?.message_thread_id;
+  const chatId = query.message?.chat?.id;
+  const messageId = query.message?.message_id;
+  const parts = data.split(":");
+  if (parts[0] === "adm" && parts[1] === "sys") {
+    const page = parts[2] || "overview";
+    await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id });
+    await handleSysinfoCommand(env, threadId, {
+      page: ["overview", "storage", "errors", "stats"].includes(page) ? page : "overview",
+      edit: chatId && messageId ? { chatId, messageId } : null
+    });
+    return;
+  }
+  if (parts[0] === "adm" && parts[1] === "u" && parts.length >= 4) {
+    const action = parts[2];
+    const userId = parts[3];
+    const tid = await resolveThreadIdForUser(env, userId) || threadId;
+    if (!tid) {
+      await tgCall(env, "answerCallbackQuery", {
+        callback_query_id: query.id,
+        text: "\u627E\u4E0D\u5230\u7528\u6237\u8BDD\u9898",
+        show_alert: true
+      });
+      return;
+    }
+    await tgCall(env, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: "\u5DF2\u6267\u884C"
+    });
+    const map = {
+      ban: () => handleBanCommand(env, tid, userId),
+      unban: () => handleUnbanCommand(env, tid, userId),
+      close: () => handleCloseCommand(env, tid, userId),
+      open: () => handleOpenCommand(env, tid, userId),
+      trust: () => handleTrustCommand(env, tid, userId),
+      reset: () => handleResetCommand(env, tid, userId),
+      mute: () => handleMuteCommand(env, tid, userId),
+      unmute: () => handleUnmuteCommand(env, tid, userId),
+      info: () => handleInfoCommand(env, tid, userId),
+      panel: () => handlePanelCommand(env, tid, userId)
+    };
+    const fn = map[action];
+    if (fn) await fn();
+    else {
+      await tgCall(env, "answerCallbackQuery", {
+        callback_query_id: query.id,
+        text: "\u672A\u77E5\u64CD\u4F5C",
+        show_alert: true
+      });
+    }
+    return;
+  }
+  await tgCall(env, "answerCallbackQuery", {
+    callback_query_id: query.id,
+    text: "\u672A\u77E5\u56DE\u8C03",
+    show_alert: true
+  });
 }
 async function _handleAdminReplyInner(msg, env, ctx) {
   const threadId = msg.message_thread_id;
   const rawText = (msg.text || "").trim();
   const text = removeCommandBotSuffix(rawText);
   const senderId = msg.from?.id;
+  const isCommand = !!text && text.startsWith("/");
   if (!senderId || !await isAdminUser(env, senderId)) {
+    if (isCommand && senderId) {
+      await tgCall(env, "sendMessage", {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: "\u26D4 \u65E0\u7BA1\u7406\u6743\u9650\uFF1A\u4EC5\u7FA4\u4E3B/\u7BA1\u7406\u5458\u6216 ADMIN_IDS \u767D\u540D\u5355\u53EF\u4F7F\u7528\u6307\u4EE4\u3002"
+      });
+    }
     return;
   }
   if (text === "/cleanup") {
@@ -3447,6 +4435,26 @@ async function _handleAdminReplyInner(msg, env, ctx) {
   }
   if (text === "/help") {
     await handleHelpCommand(env, threadId);
+    return;
+  }
+  if (text === "/sysinfo" || text === "/system" || text === "/status") {
+    await handleSysinfoCommand(env, threadId, { page: "overview" });
+    return;
+  }
+  if (text === "/stats") {
+    await handleStatsCommand(env, threadId);
+    return;
+  }
+  if (text === "/whoami") {
+    await handleWhoamiCommand(env, threadId, senderId);
+    return;
+  }
+  if (text === "/synccommands") {
+    await handleSyncCommandsCommand(env, threadId, senderId);
+    return;
+  }
+  if (text.startsWith("/find")) {
+    await handleFindCommand(env, threadId, text);
     return;
   }
   if (text.startsWith("/addword ")) {
@@ -3466,6 +4474,13 @@ async function _handleAdminReplyInner(msg, env, ctx) {
   if (mappedUser) {
     userId = Number(mappedUser);
   } else if (threadNotFoundCache.has(threadId) && Date.now() - threadNotFoundCache.get(threadId) < THREAD_NOT_FOUND_TTL_MS) {
+    if (isCommand) {
+      await tgCall(env, "sendMessage", {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: "\u26A0\uFE0F \u5F53\u524D\u8BDD\u9898\u672A\u5173\u8054\u7528\u6237\uFF08\u8BF7\u5728\u5BF9\u5E94\u7528\u6237 Forum Topic \u5185\u6267\u884C\uFF0C\u6216\u4F7F\u7528 /find\uFF09\u3002"
+      });
+    }
     return;
   } else {
     const allKeys = await getAllKeys(env, "user:");
@@ -3485,7 +4500,16 @@ async function _handleAdminReplyInner(msg, env, ctx) {
       threadNotFoundCache.set(threadId, Date.now());
     }
   }
-  if (!userId) return;
+  if (!userId) {
+    if (isCommand) {
+      await tgCall(env, "sendMessage", {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: "\u26A0\uFE0F \u5F53\u524D\u8BDD\u9898\u672A\u5173\u8054\u7528\u6237\u3002\u5168\u5C40\u547D\u4EE4\uFF1A/sysinfo /stats /find /help"
+      });
+    }
+    return;
+  }
   if (text === "/close") {
     await handleCloseCommand(env, threadId, userId);
     return;
@@ -3514,6 +4538,22 @@ async function _handleAdminReplyInner(msg, env, ctx) {
     await handleInfoCommand(env, threadId, userId);
     return;
   }
+  if (text === "/panel") {
+    await handlePanelCommand(env, threadId, userId);
+    return;
+  }
+  if (text === "/mute") {
+    await handleMuteCommand(env, threadId, userId);
+    return;
+  }
+  if (text === "/unmute") {
+    await handleUnmuteCommand(env, threadId, userId);
+    return;
+  }
+  if (text.startsWith("/note")) {
+    await handleNoteCommand(env, threadId, userId, text);
+    return;
+  }
   if (msg.media_group_id) {
     await handleMediaGroup(msg, env, ctx, { direction: "t2p", targetChat: userId, threadId: void 0 });
     return;
@@ -3534,7 +4574,8 @@ async function _handleAdminReplyInner(msg, env, ctx) {
     });
   }
 }
-async function sendVerificationChallenge(userId, env, pendingMsgId) {
+async function sendVerificationChallenge(userId, env, pendingMsgId, from = null) {
+  if (from) await saveUserProfileSnapshot(env, userId, from);
   const writtenKeys = [];
   try {
     await _sendVerificationChallengeInner(userId, env, pendingMsgId, writtenKeys);
@@ -3741,6 +4782,7 @@ async function handleCallbackQuery(query, env, ctx) {
         verifyId,
         selectedOption: state.options[selectedIndex]
       });
+      await bumpDailyStat(env, "verifies", 1);
       await ephemeralStore(env).setVerification(userId, {
         ttl: CONFIG.VERIFIED_EXPIRE_SECONDS,
         verifiedAt: Date.now()
@@ -3807,10 +4849,11 @@ async function forwardPendingMessages(state, userId, query, env, ctx) {
           Logger.info("message_forward_duplicate_skipped", { userId, messageId: pendingId });
           return { forwarded: false, reason: "already_forwarded" };
         }
+        const topicFrom = await resolveUserFromForTopic(env, userId, query?.from);
         const fakeMsg = {
           message_id: pendingId,
           chat: { id: userId, type: "private" },
-          from: query.from
+          from: topicFrom
         };
         await forwardToTopic(fakeMsg, userId, `user:${userId}`, env, ctx);
         await env.TOPIC_MAP.put(forwardedKey, "1", { expirationTtl: 3600 });
@@ -4024,11 +5067,13 @@ async function updateThreadStatus(threadId, isClosed, env) {
   }
 }
 function buildTopicTitle2(from) {
-  const firstName = (from.first_name || "").trim().substring(0, CONFIG.MAX_NAME_LENGTH);
-  const lastName = (from.last_name || "").trim().substring(0, CONFIG.MAX_NAME_LENGTH);
+  const src = from || {};
+  const firstName = (src.first_name || src.firstName || "").trim().substring(0, CONFIG.MAX_NAME_LENGTH);
+  const lastName = (src.last_name || src.lastName || "").trim().substring(0, CONFIG.MAX_NAME_LENGTH);
   let username = "";
-  if (from.username) {
-    username = from.username.replace(/[^\w]/g, "").substring(0, 20);
+  const rawUsername = src.username || "";
+  if (rawUsername) {
+    username = String(rawUsername).replace(/[^\w]/g, "").substring(0, 20);
   }
   const cleanName = (firstName + " " + lastName).replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/\s+/g, " ").trim();
   const name = cleanName || "User";

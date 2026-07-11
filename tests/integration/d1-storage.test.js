@@ -3,6 +3,57 @@ import { createMockD1 } from '../helpers/mock-d1.js';
 import { ensureMigrations } from '../../src/storage/migrations.js';
 import { createD1Storage } from '../../src/storage/d1-storage.js';
 
+describe('D1 system stats', () => {
+  it('汇总用户与最近对话信息', async () => {
+    const db = createMockD1();
+    await ensureMigrations(db, 1000);
+    const storage = createD1Storage(db);
+    await storage.upsertUser({
+      userId: '1',
+      username: 'alice',
+      firstName: 'Alice',
+      topicId: '10',
+      lastMessageAt: 1000,
+    });
+    await storage.upsertUser({
+      userId: '2',
+      username: 'bob',
+      firstName: 'Bob',
+      topicId: '20',
+      status: 'banned',
+      lastMessageAt: 5000,
+    });
+    await storage.upsertUser({
+      userId: '3',
+      firstName: 'Carol',
+      lastMessageAt: 3000,
+    });
+
+    const stats = await storage.getSystemStats();
+    expect(stats.usersTotal).toBe(3);
+    expect(stats.usersWithTopic).toBe(2);
+    expect(stats.usersBanned).toBe(1);
+    expect(stats.lastActiveUser).toMatchObject({
+      userId: '2',
+      username: 'bob',
+      firstName: 'Bob',
+      lastMessageAt: 5000,
+    });
+    expect(stats.recentActiveUsers?.map(u => u.userId)).toEqual(['2', '3', '1']);
+  });
+
+  it('searchUsers 支持 UID 与用户名', async () => {
+    const db = createMockD1();
+    await ensureMigrations(db, 1000);
+    const storage = createD1Storage(db);
+    await storage.upsertUser({ userId: '99', username: 'findme', firstName: 'Find' });
+    await expect(storage.searchUsers('99')).resolves.toHaveLength(1);
+    await expect(storage.searchUsers('findme')).resolves.toEqual([
+      expect.objectContaining({ userId: '99', username: 'findme' }),
+    ]);
+  });
+});
+
 describe('D1 migrations', () => {
   it('迁移重复执行不会重复应用版本', async () => {
     const db = createMockD1();

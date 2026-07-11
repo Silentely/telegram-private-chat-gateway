@@ -404,6 +404,81 @@ export function createD1Storage(db) {
         WHERE update_id = ?
       `).bind(String(errorCode || 'temporary'), String(updateId)).run();
     },
+
+    /**
+     * 系统信息统计（管理员 /sysinfo）
+     */
+    async getSystemStats() {
+      const [
+        users,
+        withTopic,
+        banned,
+        closed,
+        processing,
+        retryable,
+        links,
+        rules,
+        lastActive,
+        recentActive,
+      ] = await Promise.all([
+        db.prepare('SELECT COUNT(*) AS total FROM users').first(),
+        db.prepare('SELECT COUNT(*) AS total FROM users WHERE topic_id IS NOT NULL').first(),
+        db.prepare("SELECT COUNT(*) AS total FROM users WHERE status = 'banned'").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM users WHERE status = 'closed'").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM processed_updates WHERE status = 'processing'").first(),
+        db.prepare("SELECT COUNT(*) AS total FROM processed_updates WHERE status = 'retryable'").first(),
+        db.prepare('SELECT COUNT(*) AS total FROM message_links').first(),
+        db.prepare('SELECT COUNT(*) AS total FROM rules').first(),
+        db.prepare(`
+          SELECT user_id, username, first_name, last_name, last_message_at, topic_id, status
+          FROM users
+          ORDER BY COALESCE(last_message_at, 0) DESC
+          LIMIT 1
+        `).first(),
+        db.prepare(`
+          SELECT user_id, username, first_name, last_name, last_message_at, topic_id, status
+          FROM users
+          ORDER BY COALESCE(last_message_at, 0) DESC
+          LIMIT 5
+        `).all(),
+      ]);
+
+      return {
+        usersTotal: Number(users?.total || 0),
+        usersWithTopic: Number(withTopic?.total || 0),
+        usersBanned: Number(banned?.total || 0),
+        usersClosed: Number(closed?.total || 0),
+        updatesProcessing: Number(processing?.total || 0),
+        updatesRetryable: Number(retryable?.total || 0),
+        messageLinks: Number(links?.total || 0),
+        rulesTotal: Number(rules?.total || 0),
+        lastActiveUser: lastActive ? mapUser(lastActive) : null,
+        recentActiveUsers: (recentActive?.results || []).map(mapUser),
+      };
+    },
+
+    /**
+     * 按 UID 精确或用户名/姓名模糊查找（管理员 /find）
+     */
+    async searchUsers(query, limit = 10) {
+      const q = String(query || '').trim();
+      if (!q) return [];
+      const lim = Math.min(Math.max(Number(limit) || 10, 1), 20);
+      // 纯数字优先按 user_id 精确查
+      if (/^\d{1,20}$/.test(q)) {
+        const one = await this.getUser(q);
+        return one ? [one] : [];
+      }
+      const like = `%${q.replace(/%/g, '')}%`;
+      const result = await db.prepare(`
+        SELECT user_id, username, first_name, last_name, last_message_at, topic_id, status, trust_level
+        FROM users
+        WHERE username LIKE ? OR first_name LIKE ? OR last_name LIKE ?
+        ORDER BY COALESCE(last_message_at, 0) DESC
+        LIMIT ?
+      `).bind(like, like, like, lim).all();
+      return (result.results || []).map(mapUser);
+    },
   };
 
   return storage;
