@@ -3557,7 +3557,7 @@ function buildUserActionKeyboard(userId) {
   return {
     inline_keyboard: [
       [
-        { text: "\u{1F6AB} \u5C01\u7981", callback_data: `adm:u:ban:${id}` },
+        { text: "\u{1F6AB} \u5C01\u7981", callback_data: `adm:u:banask:${id}` },
         { text: "\u2705 \u89E3\u5C01", callback_data: `adm:u:unban:${id}` }
       ],
       [
@@ -3566,31 +3566,32 @@ function buildUserActionKeyboard(userId) {
       ],
       [
         { text: "\u{1F31F} \u4FE1\u4EFB", callback_data: `adm:u:trust:${id}` },
-        { text: "\u{1F504} \u91CD\u7F6E\u9A8C\u8BC1", callback_data: `adm:u:reset:${id}` }
+        { text: "\u{1F504} \u91CD\u7F6E", callback_data: `adm:u:reset:${id}` }
       ],
       [
         { text: "\u{1F507} \u9759\u97F3", callback_data: `adm:u:mute:${id}` },
         { text: "\u{1F50A} \u53D6\u6D88\u9759\u97F3", callback_data: `adm:u:unmute:${id}` }
       ],
       [
-        { text: "\u{1F464} \u5237\u65B0\u8D44\u6599", callback_data: `adm:u:info:${id}` },
-        { text: "\u{1F39B} \u9762\u677F", callback_data: `adm:u:panel:${id}` }
+        { text: "\u{1F464} \u8D44\u6599", callback_data: `adm:u:info:${id}` },
+        { text: "\u{1F4DD} \u770B\u5907\u6CE8", callback_data: `adm:u:shownote:${id}` }
       ]
     ]
   };
 }
 function buildSysinfoKeyboard(page = "overview") {
-  const mark = (p, label) => p === page ? `\u2022 ${label}` : label;
+  const mark = (p, label) => p === page ? `\xB7${label}\xB7` : label;
   return {
     inline_keyboard: [
       [
         { text: mark("overview", "\u6982\u89C8"), callback_data: "adm:sys:overview" },
         { text: mark("storage", "\u5B58\u50A8"), callback_data: "adm:sys:storage" },
-        { text: mark("errors", "\u9519\u8BEF"), callback_data: "adm:sys:errors" }
+        { text: mark("errors", "\u9519\u8BEF"), callback_data: "adm:sys:errors" },
+        { text: mark("stats", "\u4ECA\u65E5"), callback_data: "adm:sys:stats" }
       ],
       [
-        { text: "\u{1F504} \u5237\u65B0", callback_data: `adm:sys:${page}` },
-        { text: "\u{1F4CA} \u4ECA\u65E5", callback_data: "adm:sys:stats" }
+        { text: "\u{1F504} \u5237\u65B0", callback_data: `adm:sys:${page === "stats" ? "stats" : page}` },
+        { text: "\u{1F3E0} \u83DC\u5355", callback_data: "adm:nav:menu" }
       ]
     ]
   };
@@ -3643,30 +3644,48 @@ async function resolveThreadIdForUser(env, userId) {
   }
   return null;
 }
-async function handleHelpCommand(env, threadId) {
-  const helpText = `\u{1F4CB} <b>\u6307\u4EE4\u5217\u8868</b> \xB7 v${GATEWAY_VERSION}
+async function handleHelpCommand(env, threadId, senderId = null) {
+  const helpText = `\u{1F4CB} <b>\u7BA1\u7406\u5E2E\u52A9</b> \xB7 v${GATEWAY_VERSION}
 
 <b>\u6743\u9650</b>
-\u2022 \u7FA4\u4E3B/\u7BA1\u7406\u5458 \u6216 <code>ADMIN_IDS</code> \u53EF\u7528\u7BA1\u7406\u6307\u4EE4
-\u2022 \u79C1\u804A\u7528\u6237\uFF1A<code>/start</code> <code>/help</code>
-\u2022 \u83DC\u5355\u9700 BotFather \u624B\u52A8\u6CE8\u518C\uFF1B\u770B\u89C1 \u2260 \u53EF\u7528
+\u7FA4\u4E3B/\u7BA1\u7406\u5458\u6216 <code>ADMIN_IDS</code> \xB7 \u79C1\u804A\u7528\u6237\u4EC5 <code>/start</code> <code>/help</code>
+\u547D\u4EE4\u83DC\u5355\u9700\u6CE8\u518C\uFF08BotFather \u6216 Owner <code>/synccommands</code>\uFF09
 
-<b>\u5168\u5C40</b>
-/help \xB7 /sysinfo \xB7 /stats \xB7 /whoami \xB7 /find \u5173\u952E\u8BCD
-/cleanup \xB7 /listwords \xB7 /addword \xB7 /delword
-/synccommands <i>(\u4EC5 OWNER_IDS)</i>
+<b>\u63A8\u8350\u7528\u6CD5</b>
+\u2022 <code>/menu</code> \u2014 \u6309\u94AE\u9996\u9875\uFF08\u6700\u7701\u4E8B\uFF09
+\u2022 \u7528\u6237\u8BDD\u9898\u5185 <code>/panel</code> \u6216 <code>/info</code> \u2014 \u4E00\u952E\u64CD\u4F5C
+\u2022 <code>/sysinfo</code> \u2014 \u7CFB\u7EDF\u5206\u9875\u770B\u677F
 
-<b>\u7528\u6237\u8BDD\u9898\u5185</b>
-/panel \xB7 /info \xB7 /note \u5907\u6CE8
-/ban \xB7 /unban \xB7 /close \xB7 /open \xB7 /mute \xB7 /unmute
-/trust \xB7 /reset
+<b>\u5168\u5C40\u547D\u4EE4</b>
+/menu /sysinfo /stats /whoami /find \u8BCD
+/cleanup /listwords /addword /delword
+/synccommands <i>(Owner)</i>
 
-\u70B9 <code>/panel</code> \u53EF\u7528\u6309\u94AE\u64CD\u4F5C\uFF0C\u65E0\u9700\u8BB0\u547D\u4EE4\u3002`;
+<b>\u8BDD\u9898\u5185</b>
+/panel /info /note \u5907\u6CE8
+/ban /unban /close /open /mute /unmute /trust /reset`;
   await tgCall(env, "sendMessage", {
     chat_id: env.SUPERGROUP_ID,
     message_thread_id: threadId,
     text: helpText,
-    parse_mode: "HTML"
+    parse_mode: "HTML",
+    reply_markup: buildAdminHomeKeyboard(isOwnerUser(env, senderId))
+  });
+}
+async function handleMenuCommand(env, threadId, senderId) {
+  const text = [
+    `\u{1F3E0} <b>\u7BA1\u7406\u83DC\u5355</b> \xB7 v${GATEWAY_VERSION}`,
+    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "\u70B9\u4E0B\u65B9\u6309\u94AE\u5FEB\u901F\u6253\u5F00\u529F\u80FD\uFF0C\u65E0\u9700\u8BB0\u5FC6\u547D\u4EE4\u3002",
+    "",
+    "\u{1F4A1} \u7528\u6237\u4F1A\u8BDD\u8BF7\u8FDB\u5165\u5BF9\u5E94 Forum Topic \u4F7F\u7528 <b>\u9762\u677F/\u8D44\u6599</b>\u3002"
+  ].join("\n");
+  await tgCall(env, "sendMessage", {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text,
+    parse_mode: "HTML",
+    reply_markup: buildAdminHomeKeyboard(isOwnerUser(env, senderId))
   });
 }
 function formatSysTime(ts) {
@@ -3676,6 +3695,63 @@ function formatSysTime(ts) {
   } catch {
     return String(ts);
   }
+}
+function formatRelativeTime(ts) {
+  const n = Number(ts);
+  if (!n || n <= 0) return "\u65E0";
+  const diff = Date.now() - n;
+  if (diff < 0) return formatSysTime(ts);
+  const sec = Math.floor(diff / 1e3);
+  if (sec < 60) return `${sec} \u79D2\u524D`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} \u5206\u949F\u524D`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr} \u5C0F\u65F6\u524D`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} \u5929\u524D`;
+  return formatSysTime(ts);
+}
+function formatTimeBoth(ts) {
+  if (ts == null || Number(ts) <= 0) return "\u65E0";
+  return `${formatRelativeTime(ts)} \xB7 <code>${formatSysTime(ts)}</code>`;
+}
+function statusChip(ok, okText = "\u6B63\u5E38", badText = "\u5F02\u5E38") {
+  return ok ? `\u{1F7E2} ${okText}` : `\u{1F534} ${badText}`;
+}
+function buildAdminHomeKeyboard(isOwner = false) {
+  const rows = [
+    [
+      { text: "\u{1F5A5} \u7CFB\u7EDF", callback_data: "adm:nav:sysinfo" },
+      { text: "\u{1F4CA} \u4ECA\u65E5", callback_data: "adm:nav:stats" },
+      { text: "\u{1FAAA} \u6211", callback_data: "adm:nav:whoami" }
+    ],
+    [
+      { text: "\u{1F4DD} \u5C4F\u853D\u8BCD", callback_data: "adm:nav:listwords" },
+      { text: "\u{1F9F9} \u6E05\u7406", callback_data: "adm:nav:cleanup_ask" },
+      { text: "\u2753 \u5E2E\u52A9", callback_data: "adm:nav:help" }
+    ]
+  ];
+  if (isOwner) {
+    rows.push([{ text: "\u{1F4E1} \u540C\u6B65\u547D\u4EE4\u83DC\u5355", callback_data: "adm:nav:synccommands" }]);
+  }
+  return { inline_keyboard: rows };
+}
+function buildBanConfirmKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [[
+      { text: "\u786E\u8BA4\u5C01\u7981", callback_data: `adm:u:banok:${id}` },
+      { text: "\u53D6\u6D88", callback_data: `adm:u:bancancel:${id}` }
+    ]]
+  };
+}
+function buildCleanupConfirmKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: "\u786E\u8BA4\u6E05\u7406", callback_data: "adm:nav:cleanup_ok" },
+      { text: "\u53D6\u6D88", callback_data: "adm:nav:cleanup_cancel" }
+    ]]
+  };
 }
 async function countKvPrefix(env, prefix) {
   if (!env?.TOPIC_MAP?.list) return null;
@@ -3749,18 +3825,24 @@ async function buildSysinfoPageText(env, page = "overview") {
   const turnstileOn = !!(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY && env.VERIFICATION_PAGE_URL);
   const lines = [];
   if (page === "overview" || page === "stats") {
-    lines.push(`\u{1F5A5} <b>\u7CFB\u7EDF \xB7 ${page === "stats" ? "\u4ECA\u65E5\u7EDF\u8BA1" : "\u6982\u89C8"}</b> \xB7 v${GATEWAY_VERSION}`);
-    lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
-    lines.push(`\u72B6\u6001: <b>\u8FD0\u884C\u4E2D</b>`);
-    lines.push(`KV: ${hasKv ? "\u2705" : "\u274C"} \xB7 D1: ${hasD1 ? "\u2705" : "\u274C"} \xB7 \u9A8C\u8BC1: ${turnstileOn ? "Turnstile" : "\u672C\u5730\u9898\u5E93"}`);
-    lines.push(`OWNER \u5DF2\u914D: ${parseIdAllowlist(env.OWNER_IDS).size > 0 ? "\u2705" : "\u26AA"} \xB7 SUPERGROUP: ${String(env.SUPERGROUP_ID || "").startsWith("-100") ? "\u2705" : "\u274C"}`);
+    lines.push(`\u{1F5A5} <b>\u7CFB\u7EDF \xB7 ${page === "stats" ? "\u4ECA\u65E5\u7EDF\u8BA1" : "\u6982\u89C8"}</b>`);
+    lines.push(`<code>v${GATEWAY_VERSION}</code>`);
+    lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
+    lines.push(`${statusChip(true, "Worker \u8FD0\u884C\u4E2D")}`);
+    lines.push(`${statusChip(hasKv, "KV \u5DF2\u7ED1\u5B9A", "KV \u7F3A\u5931")} \xB7 ${statusChip(hasD1, "D1 \u5DF2\u7ED1\u5B9A", "D1 \u7F3A\u5931")}`);
+    lines.push(`\u9A8C\u8BC1: ${turnstileOn ? "\u{1F6E1} Turnstile" : "\u{1F4DD} \u672C\u5730\u9898\u5E93"} \xB7 Owner: ${parseIdAllowlist(env.OWNER_IDS).size > 0 ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}`);
+    lines.push(`\u8D85\u7EA7\u7FA4 ID: ${String(env.SUPERGROUP_ID || "").startsWith("-100") ? "\u2705 \u683C\u5F0F\u6B63\u786E" : "\u274C \u9700 -100 \u5F00\u5934"}`);
     lines.push("");
     if (hasD1) {
       try {
         await ensureMigrations(env.TG_BOT_DB);
         const stats = await createD1Storage(env.TG_BOT_DB).getSystemStats();
-        lines.push(`\u{1F4CA} \u4F1A\u8BDD <b>${stats.usersTotal}</b> \u7528\u6237 \xB7 Topic ${stats.usersWithTopic} \xB7 \u5C01\u7981 ${stats.usersBanned} \xB7 \u5173\u95ED ${stats.usersClosed || 0}`);
-        lines.push(`\u{1F5C2} \u6620\u5C04 ${stats.messageLinks} \xB7 \u89C4\u5219 ${stats.rulesTotal} \xB7 \u5904\u7406\u4E2D ${stats.updatesProcessing} \xB7 \u53EF\u91CD\u8BD5 ${stats.updatesRetryable}`);
+        lines.push("\u{1F4CA} <b>\u4F1A\u8BDD</b>");
+        lines.push(`  \u7528\u6237 <b>${stats.usersTotal}</b>  \xB7  Topic ${stats.usersWithTopic}`);
+        lines.push(`  \u5C01\u7981 ${stats.usersBanned}  \xB7  \u5173\u95ED ${stats.usersClosed || 0}`);
+        lines.push("\u{1F5C2} <b>\u6570\u636E</b>");
+        lines.push(`  \u6620\u5C04 ${stats.messageLinks}  \xB7  \u89C4\u5219 ${stats.rulesTotal}`);
+        lines.push(`  Update \u5904\u7406\u4E2D/\u53EF\u91CD\u8BD5  ${stats.updatesProcessing}/${stats.updatesRetryable}`);
         const recent = stats.recentActiveUsers?.length ? stats.recentActiveUsers : stats.lastActiveUser ? [stats.lastActiveUser] : [];
         if (recent.length) {
           lines.push("");
@@ -3768,7 +3850,8 @@ async function buildSysinfoPageText(env, page = "overview") {
           for (const u of recent.slice(0, 5)) {
             const name = escapeHtml([u.firstName, u.lastName].filter(Boolean).join(" ").trim() || "\u672A\u77E5");
             const un = u.username ? `@${escapeHtml(u.username)}` : "\u65E0\u7528\u6237\u540D";
-            lines.push(`\u2022 ${name} \xB7 ${un} \xB7 <code>${escapeHtml(u.userId)}</code> \xB7 ${formatSysTime(u.lastMessageAt)}`);
+            lines.push(`\u2022 ${name} \xB7 ${un}`);
+            lines.push(`  <code>${escapeHtml(u.userId)}</code> \xB7 ${formatTimeBoth(u.lastMessageAt)}`);
           }
         } else {
           lines.push("\u6700\u8FD1\u6D3B\u8DC3: \u6682\u65E0");
@@ -3787,21 +3870,22 @@ async function buildSysinfoPageText(env, page = "overview") {
     if (page === "stats") {
       const today = await getDailyStats(env);
       lines.push("");
-      lines.push(`<b>\u4ECA\u65E5 ${escapeHtml(today.day)}</b>`);
-      lines.push(`\u2022 \u5165\u7AD9\u6D88\u606F: <b>${today.messages_in}</b>`);
-      lines.push(`\u2022 \u9A8C\u8BC1\u901A\u8FC7: ${today.verifies}`);
-      lines.push(`\u2022 \u5C01\u7981\u6B21\u6570: ${today.bans}`);
-      lines.push(`\u2022 \u5783\u573E\u62E6\u622A: ${today.spam}`);
+      lines.push(`\u{1F4C5} <b>\u4ECA\u65E5</b> <code>${escapeHtml(today.day)}</code>`);
+      lines.push(`  \u{1F4AC} \u5165\u7AD9  <b>${today.messages_in}</b>`);
+      lines.push(`  \u2705 \u9A8C\u8BC1  ${today.verifies}`);
+      lines.push(`  \u{1F6AB} \u5C01\u7981  ${today.bans}`);
+      lines.push(`  \u{1F6E1} \u5783\u573E  ${today.spam}`);
     }
     lines.push("");
-    lines.push("<b>\u7AEF\u70B9</b>");
-    lines.push(`<code>GET ${escapeHtml(baseUrl)}/health</code>`);
-    lines.push(`<code>GET \u2026/health/env</code> \xB7 <code>/health/d1</code> \xB7 <code>/verify</code>`);
-    lines.push(`<code>POST ${escapeHtml(baseUrl)}/</code> Webhook`);
+    lines.push("\u{1F517} <b>\u7AEF\u70B9</b>");
+    lines.push(`<code>${escapeHtml(baseUrl)}/health</code>`);
+    lines.push(`<code>\u2026/health/env</code> \xB7 <code>\u2026/health/d1</code> \xB7 <code>\u2026/verify</code>`);
+    lines.push(`Webhook <code>POST ${escapeHtml(baseUrl)}/</code>`);
   }
   if (page === "storage") {
-    lines.push(`\u{1F5C4} <b>\u7CFB\u7EDF \xB7 \u5B58\u50A8</b> \xB7 v${GATEWAY_VERSION}`);
-    lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
+    lines.push("\u{1F5C4} <b>\u7CFB\u7EDF \xB7 \u5B58\u50A8</b>");
+    lines.push(`<code>v${GATEWAY_VERSION}</code>`);
+    lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
     if (hasD1) {
       try {
         const stats = await createD1Storage(env.TG_BOT_DB).getSystemStats();
@@ -3829,25 +3913,25 @@ async function buildSysinfoPageText(env, page = "overview") {
     } else lines.push("KV: \u672A\u7ED1\u5B9A");
   }
   if (page === "errors") {
-    lines.push(`\u26A0\uFE0F <b>\u7CFB\u7EDF \xB7 \u6700\u8FD1\u9519\u8BEF</b> \xB7 v${GATEWAY_VERSION}`);
-    lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
+    lines.push("\u26A0\uFE0F <b>\u7CFB\u7EDF \xB7 \u6700\u8FD1\u9519\u8BEF</b>");
+    lines.push(`<code>v${GATEWAY_VERSION}</code>`);
+    lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
     const top = await collectRecentErrors(env);
     if (!top.length) {
-      lines.push("\u6682\u65E0\u8BB0\u5F55\u3002");
-      lines.push("<i>\u51B7\u542F\u52A8\u540E\u5185\u5B58\u7F13\u51B2\u4F1A\u6E05\u7A7A\uFF1B\u6210\u529F\u8DEF\u5F84\u4E0D\u8BB0\u5165\u3002</i>");
+      lines.push("\u2728 \u6682\u65E0\u9519\u8BEF\u8BB0\u5F55");
+      lines.push("<i>\u51B7\u542F\u52A8\u540E\u5185\u5B58\u7F13\u51B2\u4F1A\u6E05\u7A7A</i>");
     } else {
       for (const err of top) {
-        const when = formatSysTime(err.ts);
         const act = escapeHtml(err.action || "?");
         const msg = escapeHtml(String(err.error || "").slice(0, 140));
-        const uid = err.userId ? ` uid=${escapeHtml(err.userId)}` : "";
-        lines.push(`\u2022 <code>${when}</code>`);
-        lines.push(`  [${act}]${uid} ${msg}`);
+        const uid = err.userId ? ` \xB7 uid ${escapeHtml(err.userId)}` : "";
+        lines.push(`\u{1F534} <b>${act}</b>${uid}`);
+        lines.push(`   ${formatRelativeTime(err.ts)} \xB7 ${msg}`);
       }
     }
   }
   lines.push("");
-  lines.push(`\u23F1 ${Date.now() - started} ms`);
+  lines.push(`\u23F1 ${Date.now() - started} ms \xB7 \u70B9\u4E0B\u65B9\u5207\u6362\u5206\u9875`);
   let text = lines.join("\n");
   if (text.length > 3500) text = `${text.slice(0, 3500)}
 \u2026`;
@@ -3953,7 +4037,7 @@ async function handleFindCommand(env, threadId, queryText) {
       const un = u.username ? `@${escapeHtml(u.username)}` : "\u65E0\u7528\u6237\u540D";
       lines.push(`\u2022 ${name} \xB7 ${un}`);
       lines.push(`  UID <code>${escapeHtml(u.userId)}</code> \xB7 Topic <code>${escapeHtml(u.topicId || "-")}</code> \xB7 ${escapeHtml(u.status || "?")}`);
-      lines.push(`  \u6700\u8FD1: ${formatSysTime(u.lastMessageAt)}`);
+      lines.push(`  \u6700\u8FD1: ${formatTimeBoth(u.lastMessageAt)}`);
     }
     lines.push("", "<i>\u8BF7\u5230\u5BF9\u5E94\u7528\u6237 Forum Topic \u5185\u4F7F\u7528 /panel \u64CD\u4F5C</i>");
     await tgCall(env, "sendMessage", {
@@ -3985,6 +4069,7 @@ async function handleSyncCommandsCommand(env, threadId, senderId) {
   const commands = [
     { command: "start", description: "\u5F00\u59CB\u5BF9\u8BDD" },
     { command: "help", description: "\u5E2E\u52A9" },
+    { command: "menu", description: "\u7BA1\u7406\u83DC\u5355" },
     { command: "sysinfo", description: "\u7CFB\u7EDF\u4FE1\u606F" },
     { command: "stats", description: "\u4ECA\u65E5\u7EDF\u8BA1" },
     { command: "panel", description: "\u7528\u6237\u5FEB\u6377\u9762\u677F" },
@@ -3995,6 +4080,7 @@ async function handleSyncCommandsCommand(env, threadId, senderId) {
     { command: "unban", description: "\u89E3\u5C01\u7528\u6237" },
     { command: "close", description: "\u5173\u95ED\u5BF9\u8BDD" },
     { command: "open", description: "\u6253\u5F00\u5BF9\u8BDD" },
+    { command: "mute", description: "\u9759\u97F3\u7528\u6237" },
     { command: "listwords", description: "\u5C4F\u853D\u8BCD\u5217\u8868" },
     { command: "synccommands", description: "\u540C\u6B65\u547D\u4EE4\u83DC\u5355" }
   ];
@@ -4010,12 +4096,19 @@ async function handlePanelCommand(env, threadId, userId) {
   const from = await resolveUserFromForTopic(env, userId, null);
   const name = escapeHtml([from.first_name, from.last_name].filter(Boolean).join(" ").trim() || "\u672A\u77E5");
   const un = from.username ? `@${escapeHtml(from.username)}` : "\u65E0\u7528\u6237\u540D";
+  const ban = await env.TOPIC_MAP.get(`banned:${userId}`);
+  const muted = await env.TOPIC_MAP.get(`muted:${userId}`);
+  const rec = await safeGetJSON(env, `user:${userId}`, null);
+  const note = await env.TOPIC_MAP.get(`note:${userId}`);
   const text = [
-    "\u{1F39B} <b>\u7528\u6237\u64CD\u4F5C\u9762\u677F</b>",
-    `\u7528\u6237: ${name} \xB7 ${un}`,
-    `UID: <code>${userId}</code>`,
+    "\u{1F39B} <b>\u7528\u6237\u9762\u677F</b>",
+    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    `\u{1F464} ${name} \xB7 ${un}`,
+    `UID <code>${userId}</code>`,
+    `\u72B6\u6001  \u5C01\u7981:${ban ? "\u662F" : "\u5426"} \xB7 \u9759\u97F3:${muted ? "\u662F" : "\u5426"} \xB7 \u5173\u95ED:${rec?.closed ? "\u662F" : "\u5426"}`,
+    note ? `\u{1F4DD} ${escapeHtml(String(note).slice(0, 80))}` : "\u{1F4DD} \u65E0\u5907\u6CE8",
     "",
-    "\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\u6267\u884C\u64CD\u4F5C\uFF08\u65E0\u9700\u8BB0\u5FC6\u547D\u4EE4\uFF09"
+    "\u{1F447} \u70B9\u6309\u94AE\u64CD\u4F5C \xB7 \u5C01\u7981\u9700\u4E8C\u6B21\u786E\u8BA4"
   ].join("\n");
   await tgCall(env, "sendMessage", {
     chat_id: env.SUPERGROUP_ID,
@@ -4330,7 +4423,7 @@ async function handleInfoCommand(env, threadId, userId) {
     `\u9A8C\u8BC1: ${verifyText}`,
     `\u5C01\u7981: ${banText} \xB7 \u9759\u97F3: ${muted ? "\u{1F507} \u662F" : "\u5426"} \xB7 \u4F1A\u8BDD\u5173\u95ED: ${userRec?.closed ? "\u662F" : "\u5426"}`,
     d1Status ? `D1 \u72B6\u6001: <code>${escapeHtml(d1Status)}</code>` : "",
-    `\u6700\u8FD1\u6D88\u606F: ${formatSysTime(lastMsgAt)}`,
+    `\u6700\u8FD1\u6D88\u606F: ${formatTimeBoth(lastMsgAt)}`,
     note ? `\u5907\u6CE8: ${escapeHtml(note)}` : "\u5907\u6CE8: \u65E0\uFF08/note \u5185\u5BB9\uFF09",
     `\u94FE\u63A5: ${openLink}`,
     from.username ? "" : "<i>\u65E0\u516C\u5F00\u7528\u6237\u540D\u65F6\u90E8\u5206\u5BA2\u6237\u7AEF\u65E0\u6CD5\u70B9\u51FB tg \u94FE\u63A5</i>"
@@ -4361,11 +4454,57 @@ async function handleAdminUiCallback(query, env, ctx) {
   const parts = data.split(":");
   if (parts[0] === "adm" && parts[1] === "sys") {
     const page = parts[2] || "overview";
-    await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id });
+    await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id, text: "\u5DF2\u66F4\u65B0" });
     await handleSysinfoCommand(env, threadId, {
       page: ["overview", "storage", "errors", "stats"].includes(page) ? page : "overview",
       edit: chatId && messageId ? { chatId, messageId } : null
     });
+    return;
+  }
+  if (parts[0] === "adm" && parts[1] === "nav") {
+    const nav = parts[2];
+    if (nav === "cleanup_ask") {
+      await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id });
+      await tgCall(env, "sendMessage", {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: "\u{1F9F9} <b>\u786E\u8BA4\u6E05\u7406\u65E0\u6548\u8BDD\u9898\uFF1F</b>\n\u5C06\u626B\u63CF\u5E76\u5904\u7406\u5931\u6548 Topic \u6620\u5C04\uFF0C\u53EF\u80FD\u8017\u65F6\u3002",
+        parse_mode: "HTML",
+        reply_markup: buildCleanupConfirmKeyboard()
+      });
+      return;
+    }
+    if (nav === "cleanup_ok") {
+      await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id, text: "\u5F00\u59CB\u6E05\u7406" });
+      ctx.waitUntil(handleCleanupCommand(threadId, env));
+      return;
+    }
+    if (nav === "cleanup_cancel") {
+      await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id, text: "\u5DF2\u53D6\u6D88" });
+      if (chatId && messageId) {
+        await tgCall(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: "\u5DF2\u53D6\u6D88\u6E05\u7406\u3002"
+        });
+      }
+      return;
+    }
+    await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id });
+    if (nav === "sysinfo") await handleSysinfoCommand(env, threadId, { page: "overview" });
+    else if (nav === "stats") await handleStatsCommand(env, threadId);
+    else if (nav === "whoami") await handleWhoamiCommand(env, threadId, senderId);
+    else if (nav === "listwords") await handleListWordsCommand(env, threadId);
+    else if (nav === "help") await handleHelpCommand(env, threadId, senderId);
+    else if (nav === "menu") await handleMenuCommand(env, threadId, senderId);
+    else if (nav === "synccommands") await handleSyncCommandsCommand(env, threadId, senderId);
+    else {
+      await tgCall(env, "answerCallbackQuery", {
+        callback_query_id: query.id,
+        text: "\u672A\u77E5\u5BFC\u822A",
+        show_alert: true
+      });
+    }
     return;
   }
   if (parts[0] === "adm" && parts[1] === "u" && parts.length >= 4) {
@@ -4380,12 +4519,37 @@ async function handleAdminUiCallback(query, env, ctx) {
       });
       return;
     }
-    await tgCall(env, "answerCallbackQuery", {
-      callback_query_id: query.id,
-      text: "\u5DF2\u6267\u884C"
-    });
+    if (action === "banask") {
+      await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id });
+      await tgCall(env, "sendMessage", {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: tid,
+        text: `\u26A0\uFE0F <b>\u786E\u8BA4\u5C01\u7981\u7528\u6237</b> <code>${escapeHtml(userId)}</code>\uFF1F
+\u5BF9\u65B9\u5C06\u6536\u5230\u901A\u77E5\u4E14\u65E0\u6CD5\u7EE7\u7EED\u53D1\u6D88\u606F\u3002`,
+        parse_mode: "HTML",
+        reply_markup: buildBanConfirmKeyboard(userId)
+      });
+      return;
+    }
+    if (action === "bancancel") {
+      await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id, text: "\u5DF2\u53D6\u6D88" });
+      if (chatId && messageId) {
+        await tgCall(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: "\u5DF2\u53D6\u6D88\u5C01\u7981\u3002"
+        });
+      }
+      return;
+    }
+    if (action === "shownote") {
+      await tgCall(env, "answerCallbackQuery", { callback_query_id: query.id });
+      await handleNoteCommand(env, tid, userId, "/note");
+      return;
+    }
     const map = {
       ban: () => handleBanCommand(env, tid, userId),
+      banok: () => handleBanCommand(env, tid, userId),
       unban: () => handleUnbanCommand(env, tid, userId),
       close: () => handleCloseCommand(env, tid, userId),
       open: () => handleOpenCommand(env, tid, userId),
@@ -4397,14 +4561,19 @@ async function handleAdminUiCallback(query, env, ctx) {
       panel: () => handlePanelCommand(env, tid, userId)
     };
     const fn = map[action];
-    if (fn) await fn();
-    else {
+    if (!fn) {
       await tgCall(env, "answerCallbackQuery", {
         callback_query_id: query.id,
         text: "\u672A\u77E5\u64CD\u4F5C",
         show_alert: true
       });
+      return;
     }
+    await tgCall(env, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: action === "banok" ? "\u5DF2\u5C01\u7981" : "\u5DF2\u6267\u884C"
+    });
+    await fn();
     return;
   }
   await tgCall(env, "answerCallbackQuery", {
@@ -4420,21 +4589,32 @@ async function _handleAdminReplyInner(msg, env, ctx) {
   const senderId = msg.from?.id;
   const isCommand = !!text && text.startsWith("/");
   if (!senderId || !await isAdminUser(env, senderId)) {
-    if (isCommand && senderId) {
+    const known = /^\/(help|menu|sysinfo|system|status|stats|whoami|find|cleanup|listwords|addword|delword|panel|info|ban|unban|close|open|mute|unmute|trust|reset|note|synccommands)(@|\s|$)/i;
+    if (isCommand && senderId && known.test(text)) {
       await tgCall(env, "sendMessage", {
         chat_id: env.SUPERGROUP_ID,
         message_thread_id: threadId,
-        text: "\u26D4 \u65E0\u7BA1\u7406\u6743\u9650\uFF1A\u4EC5\u7FA4\u4E3B/\u7BA1\u7406\u5458\u6216 ADMIN_IDS \u767D\u540D\u5355\u53EF\u4F7F\u7528\u6307\u4EE4\u3002"
+        text: "\u26D4 \u65E0\u7BA1\u7406\u6743\u9650\uFF1A\u4EC5\u7FA4\u4E3B/\u7BA1\u7406\u5458\u6216 ADMIN_IDS \u53EF\u4F7F\u7528\u8BE5\u6307\u4EE4\u3002"
       });
     }
     return;
   }
   if (text === "/cleanup") {
-    ctx.waitUntil(handleCleanupCommand(threadId, env));
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: "\u{1F9F9} <b>\u786E\u8BA4\u6E05\u7406\u65E0\u6548\u8BDD\u9898\uFF1F</b>\n\u5C06\u626B\u63CF\u5931\u6548 Topic \u6620\u5C04\uFF0C\u53EF\u80FD\u8017\u65F6\u3002",
+      parse_mode: "HTML",
+      reply_markup: buildCleanupConfirmKeyboard()
+    });
     return;
   }
   if (text === "/help") {
-    await handleHelpCommand(env, threadId);
+    await handleHelpCommand(env, threadId, senderId);
+    return;
+  }
+  if (text === "/menu" || text === "/dashboard") {
+    await handleMenuCommand(env, threadId, senderId);
     return;
   }
   if (text === "/sysinfo" || text === "/system" || text === "/status") {

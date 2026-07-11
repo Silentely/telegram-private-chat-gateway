@@ -1882,7 +1882,7 @@ function buildUserActionKeyboard(userId) {
   return {
     inline_keyboard: [
       [
-        { text: '🚫 封禁', callback_data: `adm:u:ban:${id}` },
+        { text: '🚫 封禁', callback_data: `adm:u:banask:${id}` },
         { text: '✅ 解封', callback_data: `adm:u:unban:${id}` },
       ],
       [
@@ -1891,32 +1891,33 @@ function buildUserActionKeyboard(userId) {
       ],
       [
         { text: '🌟 信任', callback_data: `adm:u:trust:${id}` },
-        { text: '🔄 重置验证', callback_data: `adm:u:reset:${id}` },
+        { text: '🔄 重置', callback_data: `adm:u:reset:${id}` },
       ],
       [
         { text: '🔇 静音', callback_data: `adm:u:mute:${id}` },
         { text: '🔊 取消静音', callback_data: `adm:u:unmute:${id}` },
       ],
       [
-        { text: '👤 刷新资料', callback_data: `adm:u:info:${id}` },
-        { text: '🎛 面板', callback_data: `adm:u:panel:${id}` },
+        { text: '👤 资料', callback_data: `adm:u:info:${id}` },
+        { text: '📝 看备注', callback_data: `adm:u:shownote:${id}` },
       ],
     ],
   };
 }
 
 function buildSysinfoKeyboard(page = 'overview') {
-  const mark = (p, label) => (p === page ? `• ${label}` : label);
+  const mark = (p, label) => (p === page ? `·${label}·` : label);
   return {
     inline_keyboard: [
       [
         { text: mark('overview', '概览'), callback_data: 'adm:sys:overview' },
         { text: mark('storage', '存储'), callback_data: 'adm:sys:storage' },
         { text: mark('errors', '错误'), callback_data: 'adm:sys:errors' },
+        { text: mark('stats', '今日'), callback_data: 'adm:sys:stats' },
       ],
       [
-        { text: '🔄 刷新', callback_data: `adm:sys:${page}` },
-        { text: '📊 今日', callback_data: 'adm:sys:stats' },
+        { text: '🔄 刷新', callback_data: `adm:sys:${page === 'stats' ? 'stats' : page}` },
+        { text: '🏠 菜单', callback_data: 'adm:nav:menu' },
       ],
     ],
   };
@@ -1969,30 +1970,49 @@ async function resolveThreadIdForUser(env, userId) {
   return null;
 }
 
-async function handleHelpCommand(env, threadId) {
-  const helpText = `📋 <b>指令列表</b> · v${GATEWAY_VERSION}
+async function handleHelpCommand(env, threadId, senderId = null) {
+  const helpText = `📋 <b>管理帮助</b> · v${GATEWAY_VERSION}
 
 <b>权限</b>
-• 群主/管理员 或 <code>ADMIN_IDS</code> 可用管理指令
-• 私聊用户：<code>/start</code> <code>/help</code>
-• 菜单需 BotFather 手动注册；看见 ≠ 可用
+群主/管理员或 <code>ADMIN_IDS</code> · 私聊用户仅 <code>/start</code> <code>/help</code>
+命令菜单需注册（BotFather 或 Owner <code>/synccommands</code>）
 
-<b>全局</b>
-/help · /sysinfo · /stats · /whoami · /find 关键词
-/cleanup · /listwords · /addword · /delword
-/synccommands <i>(仅 OWNER_IDS)</i>
+<b>推荐用法</b>
+• <code>/menu</code> — 按钮首页（最省事）
+• 用户话题内 <code>/panel</code> 或 <code>/info</code> — 一键操作
+• <code>/sysinfo</code> — 系统分页看板
 
-<b>用户话题内</b>
-/panel · /info · /note 备注
-/ban · /unban · /close · /open · /mute · /unmute
-/trust · /reset
+<b>全局命令</b>
+/menu /sysinfo /stats /whoami /find 词
+/cleanup /listwords /addword /delword
+/synccommands <i>(Owner)</i>
 
-点 <code>/panel</code> 可用按钮操作，无需记命令。`;
+<b>话题内</b>
+/panel /info /note 备注
+/ban /unban /close /open /mute /unmute /trust /reset`;
   await tgCall(env, "sendMessage", {
     chat_id: env.SUPERGROUP_ID,
     message_thread_id: threadId,
     text: helpText,
     parse_mode: "HTML",
+    reply_markup: buildAdminHomeKeyboard(isOwnerUser(env, senderId)),
+  });
+}
+
+async function handleMenuCommand(env, threadId, senderId) {
+  const text = [
+    `🏠 <b>管理菜单</b> · v${GATEWAY_VERSION}`,
+    '────────────',
+    '点下方按钮快速打开功能，无需记忆命令。',
+    '',
+    '💡 用户会话请进入对应 Forum Topic 使用 <b>面板/资料</b>。',
+  ].join('\n');
+  await tgCall(env, 'sendMessage', {
+    chat_id: env.SUPERGROUP_ID,
+    message_thread_id: threadId,
+    text,
+    parse_mode: 'HTML',
+    reply_markup: buildAdminHomeKeyboard(isOwnerUser(env, senderId)),
   });
 }
 
@@ -2003,6 +2023,70 @@ function formatSysTime(ts) {
   } catch {
     return String(ts);
   }
+}
+
+/** 相对时间（中文），便于扫读 */
+function formatRelativeTime(ts) {
+  const n = Number(ts);
+  if (!n || n <= 0) return '无';
+  const diff = Date.now() - n;
+  if (diff < 0) return formatSysTime(ts);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec} 秒前`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} 天前`;
+  return formatSysTime(ts);
+}
+
+function formatTimeBoth(ts) {
+  if (ts == null || Number(ts) <= 0) return '无';
+  return `${formatRelativeTime(ts)} · <code>${formatSysTime(ts)}</code>`;
+}
+
+function statusChip(ok, okText = '正常', badText = '异常') {
+  return ok ? `🟢 ${okText}` : `🔴 ${badText}`;
+}
+
+function buildAdminHomeKeyboard(isOwner = false) {
+  const rows = [
+    [
+      { text: '🖥 系统', callback_data: 'adm:nav:sysinfo' },
+      { text: '📊 今日', callback_data: 'adm:nav:stats' },
+      { text: '🪪 我', callback_data: 'adm:nav:whoami' },
+    ],
+    [
+      { text: '📝 屏蔽词', callback_data: 'adm:nav:listwords' },
+      { text: '🧹 清理', callback_data: 'adm:nav:cleanup_ask' },
+      { text: '❓ 帮助', callback_data: 'adm:nav:help' },
+    ],
+  ];
+  if (isOwner) {
+    rows.push([{ text: '📡 同步命令菜单', callback_data: 'adm:nav:synccommands' }]);
+  }
+  return { inline_keyboard: rows };
+}
+
+function buildBanConfirmKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [[
+      { text: '确认封禁', callback_data: `adm:u:banok:${id}` },
+      { text: '取消', callback_data: `adm:u:bancancel:${id}` },
+    ]],
+  };
+}
+
+function buildCleanupConfirmKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: '确认清理', callback_data: 'adm:nav:cleanup_ok' },
+      { text: '取消', callback_data: 'adm:nav:cleanup_cancel' },
+    ]],
+  };
 }
 
 async function countKvPrefix(env, prefix) {
@@ -2083,12 +2167,16 @@ async function buildSysinfoPageText(env, page = 'overview') {
   const lines = [];
 
   if (page === 'overview' || page === 'stats') {
-    lines.push(`🖥 <b>系统 · ${page === 'stats' ? '今日统计' : '概览'}</b> · v${GATEWAY_VERSION}`);
-    lines.push('────────────');
-    lines.push(`状态: <b>运行中</b>`);
-    lines.push(`KV: ${hasKv ? '✅' : '❌'} · D1: ${hasD1 ? '✅' : '❌'} · 验证: ${turnstileOn ? 'Turnstile' : '本地题库'}`);
-    lines.push(`OWNER 已配: ${parseIdAllowlist(env.OWNER_IDS).size > 0 ? '✅' : '⚪'} · SUPERGROUP: ${
-      String(env.SUPERGROUP_ID || '').startsWith('-100') ? '✅' : '❌'
+    lines.push(`🖥 <b>系统 · ${page === 'stats' ? '今日统计' : '概览'}</b>`);
+    lines.push(`<code>v${GATEWAY_VERSION}</code>`);
+    lines.push('────────────────');
+    lines.push(`${statusChip(true, 'Worker 运行中')}`);
+    lines.push(`${statusChip(hasKv, 'KV 已绑定', 'KV 缺失')} · ${statusChip(hasD1, 'D1 已绑定', 'D1 缺失')}`);
+    lines.push(`验证: ${turnstileOn ? '🛡 Turnstile' : '📝 本地题库'} · Owner: ${
+      parseIdAllowlist(env.OWNER_IDS).size > 0 ? '已配置' : '未配置'
+    }`);
+    lines.push(`超级群 ID: ${
+      String(env.SUPERGROUP_ID || '').startsWith('-100') ? '✅ 格式正确' : '❌ 需 -100 开头'
     }`);
     lines.push('');
 
@@ -2096,8 +2184,12 @@ async function buildSysinfoPageText(env, page = 'overview') {
       try {
         await ensureMigrations(env.TG_BOT_DB);
         const stats = await createD1Storage(env.TG_BOT_DB).getSystemStats();
-        lines.push(`📊 会话 <b>${stats.usersTotal}</b> 用户 · Topic ${stats.usersWithTopic} · 封禁 ${stats.usersBanned} · 关闭 ${stats.usersClosed || 0}`);
-        lines.push(`🗂 映射 ${stats.messageLinks} · 规则 ${stats.rulesTotal} · 处理中 ${stats.updatesProcessing} · 可重试 ${stats.updatesRetryable}`);
+        lines.push('📊 <b>会话</b>');
+        lines.push(`  用户 <b>${stats.usersTotal}</b>  ·  Topic ${stats.usersWithTopic}`);
+        lines.push(`  封禁 ${stats.usersBanned}  ·  关闭 ${stats.usersClosed || 0}`);
+        lines.push('🗂 <b>数据</b>');
+        lines.push(`  映射 ${stats.messageLinks}  ·  规则 ${stats.rulesTotal}`);
+        lines.push(`  Update 处理中/可重试  ${stats.updatesProcessing}/${stats.updatesRetryable}`);
         const recent = stats.recentActiveUsers?.length
           ? stats.recentActiveUsers
           : (stats.lastActiveUser ? [stats.lastActiveUser] : []);
@@ -2107,7 +2199,8 @@ async function buildSysinfoPageText(env, page = 'overview') {
           for (const u of recent.slice(0, 5)) {
             const name = escapeHtml([u.firstName, u.lastName].filter(Boolean).join(' ').trim() || '未知');
             const un = u.username ? `@${escapeHtml(u.username)}` : '无用户名';
-            lines.push(`• ${name} · ${un} · <code>${escapeHtml(u.userId)}</code> · ${formatSysTime(u.lastMessageAt)}`);
+            lines.push(`• ${name} · ${un}`);
+            lines.push(`  <code>${escapeHtml(u.userId)}</code> · ${formatTimeBoth(u.lastMessageAt)}`);
           }
         } else {
           lines.push('最近活跃: 暂无');
@@ -2127,23 +2220,24 @@ async function buildSysinfoPageText(env, page = 'overview') {
     if (page === 'stats') {
       const today = await getDailyStats(env);
       lines.push('');
-      lines.push(`<b>今日 ${escapeHtml(today.day)}</b>`);
-      lines.push(`• 入站消息: <b>${today.messages_in}</b>`);
-      lines.push(`• 验证通过: ${today.verifies}`);
-      lines.push(`• 封禁次数: ${today.bans}`);
-      lines.push(`• 垃圾拦截: ${today.spam}`);
+      lines.push(`📅 <b>今日</b> <code>${escapeHtml(today.day)}</code>`);
+      lines.push(`  💬 入站  <b>${today.messages_in}</b>`);
+      lines.push(`  ✅ 验证  ${today.verifies}`);
+      lines.push(`  🚫 封禁  ${today.bans}`);
+      lines.push(`  🛡 垃圾  ${today.spam}`);
     }
 
     lines.push('');
-    lines.push('<b>端点</b>');
-    lines.push(`<code>GET ${escapeHtml(baseUrl)}/health</code>`);
-    lines.push(`<code>GET …/health/env</code> · <code>/health/d1</code> · <code>/verify</code>`);
-    lines.push(`<code>POST ${escapeHtml(baseUrl)}/</code> Webhook`);
+    lines.push('🔗 <b>端点</b>');
+    lines.push(`<code>${escapeHtml(baseUrl)}/health</code>`);
+    lines.push(`<code>…/health/env</code> · <code>…/health/d1</code> · <code>…/verify</code>`);
+    lines.push(`Webhook <code>POST ${escapeHtml(baseUrl)}/</code>`);
   }
 
   if (page === 'storage') {
-    lines.push(`🗄 <b>系统 · 存储</b> · v${GATEWAY_VERSION}`);
-    lines.push('────────────');
+    lines.push('🗄 <b>系统 · 存储</b>');
+    lines.push(`<code>v${GATEWAY_VERSION}</code>`);
+    lines.push('────────────────');
     if (hasD1) {
       try {
         const stats = await createD1Storage(env.TG_BOT_DB).getSystemStats();
@@ -2172,26 +2266,26 @@ async function buildSysinfoPageText(env, page = 'overview') {
   }
 
   if (page === 'errors') {
-    lines.push(`⚠️ <b>系统 · 最近错误</b> · v${GATEWAY_VERSION}`);
-    lines.push('────────────');
+    lines.push('⚠️ <b>系统 · 最近错误</b>');
+    lines.push(`<code>v${GATEWAY_VERSION}</code>`);
+    lines.push('────────────────');
     const top = await collectRecentErrors(env);
     if (!top.length) {
-      lines.push('暂无记录。');
-      lines.push('<i>冷启动后内存缓冲会清空；成功路径不记入。</i>');
+      lines.push('✨ 暂无错误记录');
+      lines.push('<i>冷启动后内存缓冲会清空</i>');
     } else {
       for (const err of top) {
-        const when = formatSysTime(err.ts);
         const act = escapeHtml(err.action || '?');
         const msg = escapeHtml(String(err.error || '').slice(0, 140));
-        const uid = err.userId ? ` uid=${escapeHtml(err.userId)}` : '';
-        lines.push(`• <code>${when}</code>`);
-        lines.push(`  [${act}]${uid} ${msg}`);
+        const uid = err.userId ? ` · uid ${escapeHtml(err.userId)}` : '';
+        lines.push(`🔴 <b>${act}</b>${uid}`);
+        lines.push(`   ${formatRelativeTime(err.ts)} · ${msg}`);
       }
     }
   }
 
   lines.push('');
-  lines.push(`⏱ ${Date.now() - started} ms`);
+  lines.push(`⏱ ${Date.now() - started} ms · 点下方切换分页`);
   let text = lines.join('\n');
   if (text.length > 3500) text = `${text.slice(0, 3500)}\n…`;
   return text;
@@ -2306,7 +2400,7 @@ async function handleFindCommand(env, threadId, queryText) {
       const un = u.username ? `@${escapeHtml(u.username)}` : '无用户名';
       lines.push(`• ${name} · ${un}`);
       lines.push(`  UID <code>${escapeHtml(u.userId)}</code> · Topic <code>${escapeHtml(u.topicId || '-')}</code> · ${escapeHtml(u.status || '?')}`);
-      lines.push(`  最近: ${formatSysTime(u.lastMessageAt)}`);
+      lines.push(`  最近: ${formatTimeBoth(u.lastMessageAt)}`);
     }
     lines.push('', '<i>请到对应用户 Forum Topic 内使用 /panel 操作</i>');
     await tgCall(env, 'sendMessage', {
@@ -2339,6 +2433,7 @@ async function handleSyncCommandsCommand(env, threadId, senderId) {
   const commands = [
     { command: 'start', description: '开始对话' },
     { command: 'help', description: '帮助' },
+    { command: 'menu', description: '管理菜单' },
     { command: 'sysinfo', description: '系统信息' },
     { command: 'stats', description: '今日统计' },
     { command: 'panel', description: '用户快捷面板' },
@@ -2349,6 +2444,7 @@ async function handleSyncCommandsCommand(env, threadId, senderId) {
     { command: 'unban', description: '解封用户' },
     { command: 'close', description: '关闭对话' },
     { command: 'open', description: '打开对话' },
+    { command: 'mute', description: '静音用户' },
     { command: 'listwords', description: '屏蔽词列表' },
     { command: 'synccommands', description: '同步命令菜单' },
   ];
@@ -2367,12 +2463,19 @@ async function handlePanelCommand(env, threadId, userId) {
   const from = await resolveUserFromForTopic(env, userId, null);
   const name = escapeHtml([from.first_name, from.last_name].filter(Boolean).join(' ').trim() || '未知');
   const un = from.username ? `@${escapeHtml(from.username)}` : '无用户名';
+  const ban = await env.TOPIC_MAP.get(`banned:${userId}`);
+  const muted = await env.TOPIC_MAP.get(`muted:${userId}`);
+  const rec = await safeGetJSON(env, `user:${userId}`, null);
+  const note = await env.TOPIC_MAP.get(`note:${userId}`);
   const text = [
-    '🎛 <b>用户操作面板</b>',
-    `用户: ${name} · ${un}`,
-    `UID: <code>${userId}</code>`,
+    '🎛 <b>用户面板</b>',
+    '────────────────',
+    `👤 ${name} · ${un}`,
+    `UID <code>${userId}</code>`,
+    `状态  封禁:${ban ? '是' : '否'} · 静音:${muted ? '是' : '否'} · 关闭:${rec?.closed ? '是' : '否'}`,
+    note ? `📝 ${escapeHtml(String(note).slice(0, 80))}` : '📝 无备注',
     '',
-    '点击下方按钮执行操作（无需记忆命令）',
+    '👇 点按钮操作 · 封禁需二次确认',
   ].join('\n');
   await tgCall(env, 'sendMessage', {
     chat_id: env.SUPERGROUP_ID,
@@ -2705,7 +2808,7 @@ async function handleInfoCommand(env, threadId, userId) {
     `验证: ${verifyText}`,
     `封禁: ${banText} · 静音: ${muted ? '🔇 是' : '否'} · 会话关闭: ${userRec?.closed ? '是' : '否'}`,
     d1Status ? `D1 状态: <code>${escapeHtml(d1Status)}</code>` : '',
-    `最近消息: ${formatSysTime(lastMsgAt)}`,
+    `最近消息: ${formatTimeBoth(lastMsgAt)}`,
     note ? `备注: ${escapeHtml(note)}` : '备注: 无（/note 内容）',
     `链接: ${openLink}`,
     from.username
@@ -2724,7 +2827,7 @@ async function handleInfoCommand(env, threadId, userId) {
 }
 
 /**
- * 管理 UI 回调：adm:sys:* / adm:u:action:userId
+ * 管理 UI 回调：adm:sys:* / adm:nav:* / adm:u:action:userId
  */
 async function handleAdminUiCallback(query, env, ctx) {
   const data = String(query.data || '');
@@ -2746,7 +2849,7 @@ async function handleAdminUiCallback(query, env, ctx) {
   // adm:sys:overview | storage | errors | stats
   if (parts[0] === 'adm' && parts[1] === 'sys') {
     const page = parts[2] || 'overview';
-    await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
+    await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id, text: '已更新' });
     await handleSysinfoCommand(env, threadId, {
       page: ['overview', 'storage', 'errors', 'stats'].includes(page) ? page : 'overview',
       edit: chatId && messageId ? { chatId, messageId } : null,
@@ -2754,7 +2857,55 @@ async function handleAdminUiCallback(query, env, ctx) {
     return;
   }
 
-  // adm:u:ban:123
+  // adm:nav:* 全局导航
+  if (parts[0] === 'adm' && parts[1] === 'nav') {
+    const nav = parts[2];
+    if (nav === 'cleanup_ask') {
+      await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
+      await tgCall(env, 'sendMessage', {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: '🧹 <b>确认清理无效话题？</b>\n将扫描并处理失效 Topic 映射，可能耗时。',
+        parse_mode: 'HTML',
+        reply_markup: buildCleanupConfirmKeyboard(),
+      });
+      return;
+    }
+    if (nav === 'cleanup_ok') {
+      await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id, text: '开始清理' });
+      ctx.waitUntil(handleCleanupCommand(threadId, env));
+      return;
+    }
+    if (nav === 'cleanup_cancel') {
+      await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id, text: '已取消' });
+      if (chatId && messageId) {
+        await tgCall(env, 'editMessageText', {
+          chat_id: chatId,
+          message_id: messageId,
+          text: '已取消清理。',
+        });
+      }
+      return;
+    }
+    await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
+    if (nav === 'sysinfo') await handleSysinfoCommand(env, threadId, { page: 'overview' });
+    else if (nav === 'stats') await handleStatsCommand(env, threadId);
+    else if (nav === 'whoami') await handleWhoamiCommand(env, threadId, senderId);
+    else if (nav === 'listwords') await handleListWordsCommand(env, threadId);
+    else if (nav === 'help') await handleHelpCommand(env, threadId, senderId);
+    else if (nav === 'menu') await handleMenuCommand(env, threadId, senderId);
+    else if (nav === 'synccommands') await handleSyncCommandsCommand(env, threadId, senderId);
+    else {
+      await tgCall(env, 'answerCallbackQuery', {
+        callback_query_id: query.id,
+        text: '未知导航',
+        show_alert: true,
+      });
+    }
+    return;
+  }
+
+  // adm:u:action:userId
   if (parts[0] === 'adm' && parts[1] === 'u' && parts.length >= 4) {
     const action = parts[2];
     const userId = parts[3];
@@ -2767,12 +2918,39 @@ async function handleAdminUiCallback(query, env, ctx) {
       });
       return;
     }
-    await tgCall(env, 'answerCallbackQuery', {
-      callback_query_id: query.id,
-      text: '已执行',
-    });
+
+    // 封禁二次确认
+    if (action === 'banask') {
+      await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
+      await tgCall(env, 'sendMessage', {
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: tid,
+        text: `⚠️ <b>确认封禁用户</b> <code>${escapeHtml(userId)}</code>？\n对方将收到通知且无法继续发消息。`,
+        parse_mode: 'HTML',
+        reply_markup: buildBanConfirmKeyboard(userId),
+      });
+      return;
+    }
+    if (action === 'bancancel') {
+      await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id, text: '已取消' });
+      if (chatId && messageId) {
+        await tgCall(env, 'editMessageText', {
+          chat_id: chatId,
+          message_id: messageId,
+          text: '已取消封禁。',
+        });
+      }
+      return;
+    }
+    if (action === 'shownote') {
+      await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
+      await handleNoteCommand(env, tid, userId, '/note');
+      return;
+    }
+
     const map = {
       ban: () => handleBanCommand(env, tid, userId),
+      banok: () => handleBanCommand(env, tid, userId),
       unban: () => handleUnbanCommand(env, tid, userId),
       close: () => handleCloseCommand(env, tid, userId),
       open: () => handleOpenCommand(env, tid, userId),
@@ -2784,14 +2962,19 @@ async function handleAdminUiCallback(query, env, ctx) {
       panel: () => handlePanelCommand(env, tid, userId),
     };
     const fn = map[action];
-    if (fn) await fn();
-    else {
+    if (!fn) {
       await tgCall(env, 'answerCallbackQuery', {
         callback_query_id: query.id,
         text: '未知操作',
         show_alert: true,
       });
+      return;
     }
+    await tgCall(env, 'answerCallbackQuery', {
+      callback_query_id: query.id,
+      text: action === 'banok' ? '已封禁' : '已执行',
+    });
+    await fn();
     return;
   }
 
@@ -2815,26 +2998,37 @@ async function _handleAdminReplyInner(msg, env, ctx) {
 
   // 仅允许管理员在群内操作与回信，防止任意群成员向用户私聊注入消息
   if (!senderId || !(await isAdminUser(env, senderId))) {
-    // 非管理员尝试斜杠命令时给出提示，避免「没反应」困惑
-    if (isCommand && senderId) {
+    // 仅对已知管理命令提示，避免普通聊天被误伤
+    const known = /^\/(help|menu|sysinfo|system|status|stats|whoami|find|cleanup|listwords|addword|delword|panel|info|ban|unban|close|open|mute|unmute|trust|reset|note|synccommands)(@|\s|$)/i;
+    if (isCommand && senderId && known.test(text)) {
       await tgCall(env, 'sendMessage', {
         chat_id: env.SUPERGROUP_ID,
         message_thread_id: threadId,
-        text: '⛔ 无管理权限：仅群主/管理员或 ADMIN_IDS 白名单可使用指令。',
+        text: '⛔ 无管理权限：仅群主/管理员或 ADMIN_IDS 可使用该指令。',
       });
     }
     return;
   }
 
-  // /cleanup 可在任何话题执行（不依赖 userId）
+  // /cleanup 二次确认
   if (text === "/cleanup") {
-    ctx.waitUntil(handleCleanupCommand(threadId, env));
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: '🧹 <b>确认清理无效话题？</b>\n将扫描失效 Topic 映射，可能耗时。',
+      parse_mode: 'HTML',
+      reply_markup: buildCleanupConfirmKeyboard(),
+    });
     return;
   }
 
   // --- 全局命令路由表（不依赖 userId，可在 General 话题执行） ---
   if (text === "/help") {
-    await handleHelpCommand(env, threadId);
+    await handleHelpCommand(env, threadId, senderId);
+    return;
+  }
+  if (text === "/menu" || text === "/dashboard") {
+    await handleMenuCommand(env, threadId, senderId);
     return;
   }
   if (text === "/sysinfo" || text === "/system" || text === "/status") {
