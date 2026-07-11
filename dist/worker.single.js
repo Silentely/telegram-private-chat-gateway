@@ -2224,7 +2224,7 @@ function rankMedal(index0) {
   if (index0 === 2) return "\u{1F949}";
   return `${index0 + 1}.`;
 }
-function displayUserLabel(u) {
+function displayUserLabel2(u) {
   if (!u || typeof u !== "object") return "\u672A\u77E5";
   const name = [u.firstName, u.lastName].filter(Boolean).join(" ").trim();
   if (name) return name;
@@ -2259,6 +2259,183 @@ function activitySourceLabel(source) {
     default:
       return source || "\u672A\u77E5";
   }
+}
+
+// src/admin-ui-format.js
+function escapeHtml(str) {
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function formatSysTime(ts) {
+  if (ts == null || ts === "" || Number(ts) <= 0) return "\u65E0";
+  try {
+    return new Date(Number(ts)).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  } catch {
+    return String(ts);
+  }
+}
+function formatRelativeTime(ts, now = Date.now()) {
+  const n = Number(ts);
+  if (!n || n <= 0) return "\u65E0";
+  const diff = Number(now) - n;
+  if (diff < 0) return formatSysTime(ts);
+  const sec = Math.floor(diff / 1e3);
+  if (sec < 60) return `${sec} \u79D2\u524D`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} \u5206\u949F\u524D`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr} \u5C0F\u65F6\u524D`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} \u5929\u524D`;
+  return formatSysTime(ts);
+}
+function formatTimeBoth(ts, now = Date.now()) {
+  if (ts == null || Number(ts) <= 0) return "\u65E0";
+  return `${formatRelativeTime(ts, now)} \xB7 <code>${formatSysTime(ts)}</code>`;
+}
+function statusChip(ok, okText = "\u6B63\u5E38", badText = "\u5F02\u5E38") {
+  return ok ? `\u{1F7E2} ${okText}` : `\u{1F534} ${badText}`;
+}
+function buildUserActionKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [
+      [
+        { text: "\u{1F6AB} \u5C01\u7981", callback_data: `adm:u:banask:${id}` },
+        { text: "\u2705 \u89E3\u5C01", callback_data: `adm:u:unban:${id}` }
+      ],
+      [
+        { text: "\u{1F512} \u5173\u95ED", callback_data: `adm:u:close:${id}` },
+        { text: "\u{1F513} \u6253\u5F00", callback_data: `adm:u:open:${id}` }
+      ],
+      [
+        { text: "\u{1F31F} \u4FE1\u4EFB", callback_data: `adm:u:trust:${id}` },
+        { text: "\u{1F504} \u91CD\u7F6E", callback_data: `adm:u:reset:${id}` }
+      ],
+      [
+        { text: "\u{1F507} \u9759\u97F3", callback_data: `adm:u:mute:${id}` },
+        { text: "\u{1F50A} \u53D6\u6D88\u9759\u97F3", callback_data: `adm:u:unmute:${id}` }
+      ],
+      [
+        { text: "\u{1F464} \u8D44\u6599", callback_data: `adm:u:info:${id}` },
+        { text: "\u{1F4DD} \u770B\u5907\u6CE8", callback_data: `adm:u:shownote:${id}` }
+      ]
+    ]
+  };
+}
+function buildSysinfoKeyboard(page = "overview") {
+  const mark = (p, label) => p === page ? `\xB7${label}\xB7` : label;
+  const refreshPage = ["overview", "storage", "errors", "stats", "activity"].includes(page) ? page : "overview";
+  return {
+    inline_keyboard: [
+      [
+        { text: mark("overview", "\u6982\u89C8"), callback_data: "adm:sys:overview" },
+        { text: mark("storage", "\u5B58\u50A8"), callback_data: "adm:sys:storage" },
+        { text: mark("errors", "\u9519\u8BEF"), callback_data: "adm:sys:errors" }
+      ],
+      [
+        { text: mark("stats", "\u4ECA\u65E5"), callback_data: "adm:sys:stats" },
+        { text: mark("activity", "\u6D3B\u8DC3"), callback_data: "adm:sys:activity" },
+        { text: "\u{1F504} \u5237\u65B0", callback_data: `adm:sys:${refreshPage}` }
+      ],
+      [
+        { text: "\u{1F3E0} \u83DC\u5355", callback_data: "adm:nav:menu" }
+      ]
+    ]
+  };
+}
+function buildUserJumpKeyboard(users, { includeMenu = true, columns = 2 } = {}) {
+  const cols = Math.min(Math.max(Number(columns) || 2, 1), 3);
+  const list = (users || []).slice(0, 8);
+  const rows = [];
+  for (let i = 0; i < list.length; i += cols) {
+    const chunk = list.slice(i, i + cols).map((u) => {
+      const label = displayUserLabel2(u).slice(0, cols === 1 ? 24 : 14);
+      return {
+        text: `\u{1F464} ${label}`,
+        callback_data: `adm:u:panel:${u.userId}`
+      };
+    });
+    rows.push(chunk);
+  }
+  if (includeMenu) {
+    rows.push([
+      { text: "\u{1F525} \u6D3B\u8DC3", callback_data: "adm:nav:rank" },
+      { text: "\u{1F3E0} \u83DC\u5355", callback_data: "adm:nav:menu" }
+    ]);
+  }
+  return { inline_keyboard: rows };
+}
+function formatRankingBlock(rankingUsers, { withCount = true, now = Date.now() } = {}) {
+  if (!rankingUsers?.length) {
+    return ["\u6682\u65E0\u4ECA\u65E5\u6D3B\u8DC3\u7528\u6237", "<i>\u6709\u5165\u7AD9\u6D88\u606F\u6216\u7528\u6237\u53D1\u8FC7\u8A00\u540E\u4F1A\u663E\u793A\u6392\u884C</i>"];
+  }
+  const lines = [];
+  rankingUsers.slice(0, 10).forEach((u, i) => {
+    const label = displayUserLabel2(u);
+    const name = escapeHtml(label);
+    const un = shouldAppendUsername(u, label) ? ` @${escapeHtml(u.username)}` : "";
+    const cnt = withCount && u.count != null ? ` \xB7 <b>${u.count}</b> \u6761` : "";
+    const when = u.lastMessageAt && u.count == null ? ` \xB7 ${formatRelativeTime(u.lastMessageAt, now)}` : "";
+    const badge = u.status === "banned" ? " \u{1F6AB}" : u.status === "closed" ? " \u{1F512}" : "";
+    lines.push(`${rankMedal(i)} ${name}${un}${cnt}${when}${badge}`);
+    lines.push(`   <code>${escapeHtml(u.userId)}</code>${u.topicId ? ` \xB7 T${escapeHtml(u.topicId)}` : ""}`);
+  });
+  return lines;
+}
+function formatHeatBlock(utcHours) {
+  const localHours = shiftHourBuckets(utcHours, OPS_TZ_OFFSET_HOURS);
+  const peaks = peakHoursFromBuckets(localHours, 3);
+  return [
+    `\u{1F321} <b>\u5C0F\u65F6\u70ED\u529B</b> <i>CST UTC+${OPS_TZ_OFFSET_HOURS} \xB7 0\u201323</i>`,
+    `<code>${formatHeatBars(localHours)}</code>`,
+    `<code>${formatHeatAxis()}</code>`,
+    `\u9AD8\u5CF0 ${escapeHtml(formatPeakHours(peaks))}`
+  ];
+}
+function formatCompareLine(label, todayVal, ydayVal) {
+  const t = Number(todayVal) || 0;
+  const y = Number(ydayVal) || 0;
+  return `  ${label}  <b>${t}</b>  <i>\u8F83\u6628 ${escapeHtml(formatDelta(t, y))}</i>`;
+}
+function buildAdminHomeKeyboard(isOwner = false) {
+  const rows = [
+    [
+      { text: "\u{1F5A5} \u7CFB\u7EDF", callback_data: "adm:nav:sysinfo" },
+      { text: "\u{1F4CA} \u4ECA\u65E5", callback_data: "adm:nav:stats" },
+      { text: "\u{1F525} \u6D3B\u8DC3", callback_data: "adm:nav:rank" }
+    ],
+    [
+      { text: "\u{1F50D} \u67E5\u627E", callback_data: "adm:nav:find" },
+      { text: "\u{1F50E} \u5907\u6CE8", callback_data: "adm:nav:notes" },
+      { text: "\u{1F4DD} \u5C4F\u853D\u8BCD", callback_data: "adm:nav:listwords" }
+    ],
+    [
+      { text: "\u{1F9F9} \u6E05\u7406", callback_data: "adm:nav:cleanup_ask" },
+      { text: "\u{1FAAA} \u6211", callback_data: "adm:nav:whoami" },
+      { text: "\u2753 \u5E2E\u52A9", callback_data: "adm:nav:help" }
+    ]
+  ];
+  if (isOwner) {
+    rows.push([{ text: "\u{1F4E1} \u540C\u6B65\u547D\u4EE4\u83DC\u5355", callback_data: "adm:nav:synccommands" }]);
+  }
+  return { inline_keyboard: rows };
+}
+function buildBanConfirmKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [[
+      { text: "\u786E\u8BA4\u5C01\u7981", callback_data: `adm:u:banok:${id}` },
+      { text: "\u53D6\u6D88", callback_data: `adm:u:bancancel:${id}` }
+    ]]
+  };
+}
+function buildCleanupConfirmKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: "\u786E\u8BA4\u6E05\u7406", callback_data: "adm:nav:cleanup_ok" },
+      { text: "\u53D6\u6D88", callback_data: "adm:nav:cleanup_cancel" }
+    ]]
+  };
 }
 
 // worker.js
@@ -3025,9 +3202,6 @@ ${reasonText}
     });
   }
 }
-function escapeHtml(str) {
-  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
 var VERIFY_PAGE_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -3729,54 +3903,6 @@ async function handleAdminReply(msg, env, ctx) {
 function isOwnerUser(env, userId) {
   return idAllowlistHas(env.OWNER_IDS, userId);
 }
-function buildUserActionKeyboard(userId) {
-  const id = String(userId);
-  return {
-    inline_keyboard: [
-      [
-        { text: "\u{1F6AB} \u5C01\u7981", callback_data: `adm:u:banask:${id}` },
-        { text: "\u2705 \u89E3\u5C01", callback_data: `adm:u:unban:${id}` }
-      ],
-      [
-        { text: "\u{1F512} \u5173\u95ED", callback_data: `adm:u:close:${id}` },
-        { text: "\u{1F513} \u6253\u5F00", callback_data: `adm:u:open:${id}` }
-      ],
-      [
-        { text: "\u{1F31F} \u4FE1\u4EFB", callback_data: `adm:u:trust:${id}` },
-        { text: "\u{1F504} \u91CD\u7F6E", callback_data: `adm:u:reset:${id}` }
-      ],
-      [
-        { text: "\u{1F507} \u9759\u97F3", callback_data: `adm:u:mute:${id}` },
-        { text: "\u{1F50A} \u53D6\u6D88\u9759\u97F3", callback_data: `adm:u:unmute:${id}` }
-      ],
-      [
-        { text: "\u{1F464} \u8D44\u6599", callback_data: `adm:u:info:${id}` },
-        { text: "\u{1F4DD} \u770B\u5907\u6CE8", callback_data: `adm:u:shownote:${id}` }
-      ]
-    ]
-  };
-}
-function buildSysinfoKeyboard(page = "overview") {
-  const mark = (p, label) => p === page ? `\xB7${label}\xB7` : label;
-  const refreshPage = ["overview", "storage", "errors", "stats", "activity"].includes(page) ? page : "overview";
-  return {
-    inline_keyboard: [
-      [
-        { text: mark("overview", "\u6982\u89C8"), callback_data: "adm:sys:overview" },
-        { text: mark("storage", "\u5B58\u50A8"), callback_data: "adm:sys:storage" },
-        { text: mark("errors", "\u9519\u8BEF"), callback_data: "adm:sys:errors" }
-      ],
-      [
-        { text: mark("stats", "\u4ECA\u65E5"), callback_data: "adm:sys:stats" },
-        { text: mark("activity", "\u6D3B\u8DC3"), callback_data: "adm:sys:activity" },
-        { text: "\u{1F504} \u5237\u65B0", callback_data: `adm:sys:${refreshPage}` }
-      ],
-      [
-        { text: "\u{1F3E0} \u83DC\u5355", callback_data: "adm:nav:menu" }
-      ]
-    ]
-  };
-}
 function emptyDailyStats(day) {
   return {
     day,
@@ -3924,60 +4050,6 @@ async function loadTodayActivity(env) {
     source
   };
 }
-function buildUserJumpKeyboard(users, { includeMenu = true, columns = 2 } = {}) {
-  const cols = Math.min(Math.max(Number(columns) || 2, 1), 3);
-  const list = (users || []).slice(0, 8);
-  const rows = [];
-  for (let i = 0; i < list.length; i += cols) {
-    const chunk = list.slice(i, i + cols).map((u) => {
-      const label = displayUserLabel(u).slice(0, cols === 1 ? 24 : 14);
-      return {
-        text: `\u{1F464} ${label}`,
-        callback_data: `adm:u:panel:${u.userId}`
-      };
-    });
-    rows.push(chunk);
-  }
-  if (includeMenu) {
-    rows.push([
-      { text: "\u{1F525} \u6D3B\u8DC3", callback_data: "adm:nav:rank" },
-      { text: "\u{1F3E0} \u83DC\u5355", callback_data: "adm:nav:menu" }
-    ]);
-  }
-  return { inline_keyboard: rows };
-}
-function formatRankingBlock(rankingUsers, { withCount = true } = {}) {
-  if (!rankingUsers?.length) {
-    return ["\u6682\u65E0\u4ECA\u65E5\u6D3B\u8DC3\u7528\u6237", "<i>\u6709\u5165\u7AD9\u6D88\u606F\u6216\u7528\u6237\u53D1\u8FC7\u8A00\u540E\u4F1A\u663E\u793A\u6392\u884C</i>"];
-  }
-  const lines = [];
-  rankingUsers.slice(0, 10).forEach((u, i) => {
-    const label = displayUserLabel(u);
-    const name = escapeHtml(label);
-    const un = shouldAppendUsername(u, label) ? ` @${escapeHtml(u.username)}` : "";
-    const cnt = withCount && u.count != null ? ` \xB7 <b>${u.count}</b> \u6761` : "";
-    const when = u.lastMessageAt && u.count == null ? ` \xB7 ${formatRelativeTime(u.lastMessageAt)}` : "";
-    const badge = u.status === "banned" ? " \u{1F6AB}" : u.status === "closed" ? " \u{1F512}" : "";
-    lines.push(`${rankMedal(i)} ${name}${un}${cnt}${when}${badge}`);
-    lines.push(`   <code>${escapeHtml(u.userId)}</code>${u.topicId ? ` \xB7 T${escapeHtml(u.topicId)}` : ""}`);
-  });
-  return lines;
-}
-function formatHeatBlock(utcHours) {
-  const localHours = shiftHourBuckets(utcHours, OPS_TZ_OFFSET_HOURS);
-  const peaks = peakHoursFromBuckets(localHours, 3);
-  return [
-    `\u{1F321} <b>\u5C0F\u65F6\u70ED\u529B</b> <i>CST UTC+${OPS_TZ_OFFSET_HOURS} \xB7 0\u201323</i>`,
-    `<code>${formatHeatBars(localHours)}</code>`,
-    `<code>${formatHeatAxis()}</code>`,
-    `\u9AD8\u5CF0 ${escapeHtml(formatPeakHours(peaks))}`
-  ];
-}
-function formatCompareLine(label, todayVal, ydayVal) {
-  const t = Number(todayVal) || 0;
-  const y = Number(ydayVal) || 0;
-  return `  ${label}  <b>${t}</b>  <i>\u8F83\u6628 ${escapeHtml(formatDelta(t, y))}</i>`;
-}
 async function resolveThreadIdForUser(env, userId) {
   const rec = await safeGetJSON(env, `user:${userId}`, null);
   if (rec?.thread_id) return rec.thread_id;
@@ -4037,76 +4109,6 @@ async function handleMenuCommand(env, threadId, senderId) {
     parse_mode: "HTML",
     reply_markup: buildAdminHomeKeyboard(isOwnerUser(env, senderId))
   });
-}
-function formatSysTime(ts) {
-  if (ts == null || ts === "" || Number(ts) <= 0) return "\u65E0";
-  try {
-    return new Date(Number(ts)).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
-  } catch {
-    return String(ts);
-  }
-}
-function formatRelativeTime(ts) {
-  const n = Number(ts);
-  if (!n || n <= 0) return "\u65E0";
-  const diff = Date.now() - n;
-  if (diff < 0) return formatSysTime(ts);
-  const sec = Math.floor(diff / 1e3);
-  if (sec < 60) return `${sec} \u79D2\u524D`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min} \u5206\u949F\u524D`;
-  const hr = Math.floor(min / 60);
-  if (hr < 48) return `${hr} \u5C0F\u65F6\u524D`;
-  const day = Math.floor(hr / 24);
-  if (day < 30) return `${day} \u5929\u524D`;
-  return formatSysTime(ts);
-}
-function formatTimeBoth(ts) {
-  if (ts == null || Number(ts) <= 0) return "\u65E0";
-  return `${formatRelativeTime(ts)} \xB7 <code>${formatSysTime(ts)}</code>`;
-}
-function statusChip(ok, okText = "\u6B63\u5E38", badText = "\u5F02\u5E38") {
-  return ok ? `\u{1F7E2} ${okText}` : `\u{1F534} ${badText}`;
-}
-function buildAdminHomeKeyboard(isOwner = false) {
-  const rows = [
-    [
-      { text: "\u{1F5A5} \u7CFB\u7EDF", callback_data: "adm:nav:sysinfo" },
-      { text: "\u{1F4CA} \u4ECA\u65E5", callback_data: "adm:nav:stats" },
-      { text: "\u{1F525} \u6D3B\u8DC3", callback_data: "adm:nav:rank" }
-    ],
-    [
-      { text: "\u{1F50D} \u67E5\u627E", callback_data: "adm:nav:find" },
-      { text: "\u{1F50E} \u5907\u6CE8", callback_data: "adm:nav:notes" },
-      { text: "\u{1F4DD} \u5C4F\u853D\u8BCD", callback_data: "adm:nav:listwords" }
-    ],
-    [
-      { text: "\u{1F9F9} \u6E05\u7406", callback_data: "adm:nav:cleanup_ask" },
-      { text: "\u{1FAAA} \u6211", callback_data: "adm:nav:whoami" },
-      { text: "\u2753 \u5E2E\u52A9", callback_data: "adm:nav:help" }
-    ]
-  ];
-  if (isOwner) {
-    rows.push([{ text: "\u{1F4E1} \u540C\u6B65\u547D\u4EE4\u83DC\u5355", callback_data: "adm:nav:synccommands" }]);
-  }
-  return { inline_keyboard: rows };
-}
-function buildBanConfirmKeyboard(userId) {
-  const id = String(userId);
-  return {
-    inline_keyboard: [[
-      { text: "\u786E\u8BA4\u5C01\u7981", callback_data: `adm:u:banok:${id}` },
-      { text: "\u53D6\u6D88", callback_data: `adm:u:bancancel:${id}` }
-    ]]
-  };
-}
-function buildCleanupConfirmKeyboard() {
-  return {
-    inline_keyboard: [[
-      { text: "\u786E\u8BA4\u6E05\u7406", callback_data: "adm:nav:cleanup_ok" },
-      { text: "\u53D6\u6D88", callback_data: "adm:nav:cleanup_cancel" }
-    ]]
-  };
 }
 async function countKvPrefix(env, prefix) {
   if (!env?.TOPIC_MAP?.list) return null;
