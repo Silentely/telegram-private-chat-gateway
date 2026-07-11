@@ -15,13 +15,15 @@ import { createKVStorage } from './src/storage/kv-storage.js';
 import { createUpdateHandler } from './src/update-router.js';
 import {
   OPS_TZ_OFFSET_HOURS,
-  utcDayStartMs,
-  utcYesterdayKey,
+  opsDayKey,
+  opsYesterdayKey,
+  opsDayStartMs,
   summarizeInboundActivity,
   shiftHourBuckets,
   peakHoursFromBuckets,
   formatHeatBars,
   formatHeatAxis,
+  formatSparkline,
   formatPeakHours,
   rankMedal,
   displayUserLabel,
@@ -1967,7 +1969,8 @@ function emptyDailyStats(day) {
 async function bumpDailyStat(env, field, n = 1) {
   if (!env?.TOPIC_MAP) return;
   try {
-    const day = new Date().toISOString().slice(0, 10);
+    // 按运维时区（CST）日历日切分，避免北京时间午夜仍算「昨天」
+    const day = opsDayKey();
     const key = `stats:${day}`;
     let obj = {};
     try {
@@ -1976,7 +1979,8 @@ async function bumpDailyStat(env, field, n = 1) {
     } catch { obj = {}; }
     if (!obj || typeof obj !== 'object') obj = {};
     obj[field] = Number(obj[field] || 0) + Number(n || 0);
-    // 入站消息同步累计小时热力（UTC），D1 不可用时仍可看趋势
+    obj.tz = `UTC+${OPS_TZ_OFFSET_HOURS}`;
+    // 入站消息同步累计小时热力（存 UTC 小时，展示时平移到 CST）
     if (field === 'messages_in') {
       if (!Array.isArray(obj.hours) || obj.hours.length !== 24) {
         obj.hours = Array.from({ length: 24 }, () => 0);
@@ -1989,7 +1993,7 @@ async function bumpDailyStat(env, field, n = 1) {
   } catch { /* 统计失败不影响主流程 */ }
 }
 
-async function getDailyStats(env, day = new Date().toISOString().slice(0, 10)) {
+async function getDailyStats(env, day = opsDayKey()) {
   try {
     const raw = await env.TOPIC_MAP.get(`stats:${day}`);
     if (!raw) return emptyDailyStats(day);
@@ -2011,12 +2015,32 @@ async function getDailyStats(env, day = new Date().toISOString().slice(0, 10)) {
   }
 }
 
+/** 近 N 个运维日入站序列（含今日） */
+async function getRecentDailySeries(env, days = 7) {
+  const n = Math.min(Math.max(Number(days) || 7, 1), 14);
+  const series = [];
+  const now = Date.now();
+  for (let i = n - 1; i >= 0; i -= 1) {
+    const day = opsDayKey(now - i * 86400_000);
+    const s = await getDailyStats(env, day);
+    series.push({
+      day,
+      messages_in: s.messages_in,
+      verifies: s.verifies,
+      bans: s.bans,
+      spam: s.spam,
+    });
+  }
+  return series;
+}
+
 /**
  * 今日活跃：优先 message_links 入站汇总，不足时用 last_message_at / KV 小时桶兜底
+ * 「今日」= 运维时区（CST）日历日
  */
 async function loadTodayActivity(env) {
-  const dayStart = utcDayStartMs();
-  const day = new Date().toISOString().slice(0, 10);
+  const dayStart = opsDayStartMs();
+  const day = opsDayKey();
   const today = await getDailyStats(env, day);
   let summary = summarizeInboundActivity([], { topN: 10 });
   let source = 'none';
@@ -2185,6 +2209,7 @@ async function handleHelpCommand(env, threadId, senderId = null) {
 • <code>/menu</code> — 按钮首页（最省事）
 • 用户话题内 <code>/panel</code> 或 <code>/info</code> — 一键操作
 • <code>/sysinfo</code> / <code>/rank</code> — 系统与今日活跃看板
+• 统计「今日」按 <b>中国时间 CST</b> 日切
 
 <b>全局命令</b>
 /menu /sysinfo /stats /rank /whoami
@@ -2194,7 +2219,7 @@ async function handleHelpCommand(env, threadId, senderId = null) {
 
 <b>话题内</b>
 /panel /info /note 备注
-/ban /unban /close /open /mute /unmute /trust /reset`;
+/ban(需确认) /unban /close /open /mute /unmute /trust /reset`;
   await tgCall(env, "sendMessage", {
     chat_id: env.SUPERGROUP_ID,
     message_thread_id: threadId,
@@ -2434,14 +2459,22 @@ async function buildSysinfoPageText(env, page = 'overview') {
     if (page === 'stats') {
       activity = await loadTodayActivity(env);
       const today = activity.today;
-      const yday = await getDailyStats(env, utcYesterdayKey());
+      const yday = await getDailyStats(env, opsYesterdayKey());
+      const week = await getRecentDailySeries(env, 7);
       lines.push('');
-      lines.push(`📅 <b>今日</b> <code>${escapeHtml(today.day)}</code> <i>UTC 日</i>`);
+      lines.push(`📅 <b>今日</b> <code>${escapeHtml(today.day)}</code> <i>CST UTC+${OPS_TZ_OFFSET_HOURS}</i>`);
       lines.push(formatCompareLine('💬 入站', today.messages_in, yday.messages_in));
       lines.push(formatCompareLine('✅ 验证', today.verifies, yday.verifies));
       lines.push(formatCompareLine('🚫 封禁', today.bans, yday.bans));
       lines.push(formatCompareLine('🛡 垃圾', today.spam, yday.spam));
       lines.push(`  <i>昨 ${escapeHtml(yday.day)}：入站 ${yday.messages_in} · 验证 ${yday.verifies} · 垃圾 ${yday.spam}</i>`);
+      lines.push('');
+      lines.push('📈 <b>近 7 日入站</b> <i>CST</i>');
+      lines.push(`<code>${formatSparkline(week.map(d => d.messages_in))}</code>`);
+      lines.push(week.map(d => {
+        const mmdd = d.day.slice(5);
+        return `${mmdd}:${d.messages_in}`;
+      }).join(' · '));
       lines.push('');
       lines.push(...formatHeatBlock(activity.summary.hours));
       if (activity.rankingUsers.length) {
@@ -2462,7 +2495,7 @@ async function buildSysinfoPageText(env, page = 'overview') {
     activity = await loadTodayActivity(env);
     const unique = activity.summary.uniqueUsers || activity.rankingUsers.length;
     lines.push('🔥 <b>系统 · 今日活跃</b>');
-    lines.push(`<code>v${GATEWAY_VERSION}</code> · <code>${escapeHtml(activity.day)}</code> UTC 日`);
+    lines.push(`<code>v${GATEWAY_VERSION}</code> · <code>${escapeHtml(activity.day)}</code> CST`);
     lines.push('────────────────');
     lines.push(`入站样本 <b>${activity.summary.total}</b> · 独立用户 <b>${unique}</b>`);
     lines.push(`数据源: ${escapeHtml(activitySourceLabel(activity.source))}`);
@@ -2474,7 +2507,7 @@ async function buildSysinfoPageText(env, page = 'overview') {
       withCount: activity.rankingUsers.some(u => u.count != null),
     }));
     lines.push('');
-    lines.push('<i>点下方用户按钮打开面板 · 热力按中国时间 CST</i>');
+    lines.push('<i>点下方用户按钮打开面板 · 日切与热力均为中国时间 CST</i>');
   }
 
   if (page === 'storage') {

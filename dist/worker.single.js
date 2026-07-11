@@ -2136,15 +2136,31 @@ function createKVStorage(kv) {
 
 // src/activity-summary.js
 var OPS_TZ_OFFSET_HOURS = 8;
-function utcDayStartMs(now = Date.now()) {
-  const d = new Date(Number(now) || Date.now());
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+function opsDayKey(now = Date.now(), offsetHours = OPS_TZ_OFFSET_HOURS) {
+  const off = Number(offsetHours);
+  const shifted = new Date(Number(now) + off * 36e5);
+  return shifted.toISOString().slice(0, 10);
 }
-function utcDayKey(now = Date.now()) {
-  return new Date(Number(now) || Date.now()).toISOString().slice(0, 10);
+function opsYesterdayKey(now = Date.now(), offsetHours = OPS_TZ_OFFSET_HOURS) {
+  return opsDayKey(Number(now) - 864e5, offsetHours);
 }
-function utcYesterdayKey(now = Date.now()) {
-  return utcDayKey(Number(now) - 864e5);
+function opsDayStartMs(now = Date.now(), offsetHours = OPS_TZ_OFFSET_HOURS) {
+  const key = opsDayKey(now, offsetHours);
+  const [y, m, d] = key.split("-").map(Number);
+  const off = Number(offsetHours);
+  return Date.UTC(y, m - 1, d) - off * 36e5;
+}
+function formatSparkline(values) {
+  const list = (values || []).map((n) => Math.max(0, Number(n) || 0));
+  if (!list.length) return "";
+  const max = Math.max(0, ...list);
+  if (max <= 0) return "\xB7".repeat(list.length);
+  const blocks = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
+  return list.map((n) => {
+    if (n <= 0) return "\xB7";
+    const level = Math.min(8, Math.max(1, Math.ceil(n / max * 8)));
+    return blocks[level - 1];
+  }).join("");
 }
 function summarizeInboundActivity(rows, opts = {}) {
   const topN = Math.min(Math.max(Number(opts.topN) || 10, 1), 30);
@@ -3774,7 +3790,7 @@ function emptyDailyStats(day) {
 async function bumpDailyStat(env, field, n = 1) {
   if (!env?.TOPIC_MAP) return;
   try {
-    const day = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    const day = opsDayKey();
     const key = `stats:${day}`;
     let obj = {};
     try {
@@ -3785,6 +3801,7 @@ async function bumpDailyStat(env, field, n = 1) {
     }
     if (!obj || typeof obj !== "object") obj = {};
     obj[field] = Number(obj[field] || 0) + Number(n || 0);
+    obj.tz = `UTC+${OPS_TZ_OFFSET_HOURS}`;
     if (field === "messages_in") {
       if (!Array.isArray(obj.hours) || obj.hours.length !== 24) {
         obj.hours = Array.from({ length: 24 }, () => 0);
@@ -3797,7 +3814,7 @@ async function bumpDailyStat(env, field, n = 1) {
   } catch {
   }
 }
-async function getDailyStats(env, day = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)) {
+async function getDailyStats(env, day = opsDayKey()) {
   try {
     const raw = await env.TOPIC_MAP.get(`stats:${day}`);
     if (!raw) return emptyDailyStats(day);
@@ -3816,9 +3833,26 @@ async function getDailyStats(env, day = (/* @__PURE__ */ new Date()).toISOString
     return emptyDailyStats(day);
   }
 }
+async function getRecentDailySeries(env, days = 7) {
+  const n = Math.min(Math.max(Number(days) || 7, 1), 14);
+  const series = [];
+  const now = Date.now();
+  for (let i = n - 1; i >= 0; i -= 1) {
+    const day = opsDayKey(now - i * 864e5);
+    const s = await getDailyStats(env, day);
+    series.push({
+      day,
+      messages_in: s.messages_in,
+      verifies: s.verifies,
+      bans: s.bans,
+      spam: s.spam
+    });
+  }
+  return series;
+}
 async function loadTodayActivity(env) {
-  const dayStart = utcDayStartMs();
-  const day = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const dayStart = opsDayStartMs();
+  const day = opsDayKey();
   const today = await getDailyStats(env, day);
   let summary = summarizeInboundActivity([], { topN: 10 });
   let source = "none";
@@ -3967,6 +4001,7 @@ async function handleHelpCommand(env, threadId, senderId = null) {
 \u2022 <code>/menu</code> \u2014 \u6309\u94AE\u9996\u9875\uFF08\u6700\u7701\u4E8B\uFF09
 \u2022 \u7528\u6237\u8BDD\u9898\u5185 <code>/panel</code> \u6216 <code>/info</code> \u2014 \u4E00\u952E\u64CD\u4F5C
 \u2022 <code>/sysinfo</code> / <code>/rank</code> \u2014 \u7CFB\u7EDF\u4E0E\u4ECA\u65E5\u6D3B\u8DC3\u770B\u677F
+\u2022 \u7EDF\u8BA1\u300C\u4ECA\u65E5\u300D\u6309 <b>\u4E2D\u56FD\u65F6\u95F4 CST</b> \u65E5\u5207
 
 <b>\u5168\u5C40\u547D\u4EE4</b>
 /menu /sysinfo /stats /rank /whoami
@@ -3976,7 +4011,7 @@ async function handleHelpCommand(env, threadId, senderId = null) {
 
 <b>\u8BDD\u9898\u5185</b>
 /panel /info /note \u5907\u6CE8
-/ban /unban /close /open /mute /unmute /trust /reset`;
+/ban(\u9700\u786E\u8BA4) /unban /close /open /mute /unmute /trust /reset`;
   await tgCall(env, "sendMessage", {
     chat_id: env.SUPERGROUP_ID,
     message_thread_id: threadId,
@@ -4191,14 +4226,22 @@ async function buildSysinfoPageText(env, page = "overview") {
     if (page === "stats") {
       activity = await loadTodayActivity(env);
       const today = activity.today;
-      const yday = await getDailyStats(env, utcYesterdayKey());
+      const yday = await getDailyStats(env, opsYesterdayKey());
+      const week = await getRecentDailySeries(env, 7);
       lines.push("");
-      lines.push(`\u{1F4C5} <b>\u4ECA\u65E5</b> <code>${escapeHtml(today.day)}</code> <i>UTC \u65E5</i>`);
+      lines.push(`\u{1F4C5} <b>\u4ECA\u65E5</b> <code>${escapeHtml(today.day)}</code> <i>CST UTC+${OPS_TZ_OFFSET_HOURS}</i>`);
       lines.push(formatCompareLine("\u{1F4AC} \u5165\u7AD9", today.messages_in, yday.messages_in));
       lines.push(formatCompareLine("\u2705 \u9A8C\u8BC1", today.verifies, yday.verifies));
       lines.push(formatCompareLine("\u{1F6AB} \u5C01\u7981", today.bans, yday.bans));
       lines.push(formatCompareLine("\u{1F6E1} \u5783\u573E", today.spam, yday.spam));
       lines.push(`  <i>\u6628 ${escapeHtml(yday.day)}\uFF1A\u5165\u7AD9 ${yday.messages_in} \xB7 \u9A8C\u8BC1 ${yday.verifies} \xB7 \u5783\u573E ${yday.spam}</i>`);
+      lines.push("");
+      lines.push("\u{1F4C8} <b>\u8FD1 7 \u65E5\u5165\u7AD9</b> <i>CST</i>");
+      lines.push(`<code>${formatSparkline(week.map((d) => d.messages_in))}</code>`);
+      lines.push(week.map((d) => {
+        const mmdd = d.day.slice(5);
+        return `${mmdd}:${d.messages_in}`;
+      }).join(" \xB7 "));
       lines.push("");
       lines.push(...formatHeatBlock(activity.summary.hours));
       if (activity.rankingUsers.length) {
@@ -4217,7 +4260,7 @@ async function buildSysinfoPageText(env, page = "overview") {
     activity = await loadTodayActivity(env);
     const unique = activity.summary.uniqueUsers || activity.rankingUsers.length;
     lines.push("\u{1F525} <b>\u7CFB\u7EDF \xB7 \u4ECA\u65E5\u6D3B\u8DC3</b>");
-    lines.push(`<code>v${GATEWAY_VERSION}</code> \xB7 <code>${escapeHtml(activity.day)}</code> UTC \u65E5`);
+    lines.push(`<code>v${GATEWAY_VERSION}</code> \xB7 <code>${escapeHtml(activity.day)}</code> CST`);
     lines.push("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500");
     lines.push(`\u5165\u7AD9\u6837\u672C <b>${activity.summary.total}</b> \xB7 \u72EC\u7ACB\u7528\u6237 <b>${unique}</b>`);
     lines.push(`\u6570\u636E\u6E90: ${escapeHtml(activitySourceLabel(activity.source))}`);
@@ -4229,7 +4272,7 @@ async function buildSysinfoPageText(env, page = "overview") {
       withCount: activity.rankingUsers.some((u) => u.count != null)
     }));
     lines.push("");
-    lines.push("<i>\u70B9\u4E0B\u65B9\u7528\u6237\u6309\u94AE\u6253\u5F00\u9762\u677F \xB7 \u70ED\u529B\u6309\u4E2D\u56FD\u65F6\u95F4 CST</i>");
+    lines.push("<i>\u70B9\u4E0B\u65B9\u7528\u6237\u6309\u94AE\u6253\u5F00\u9762\u677F \xB7 \u65E5\u5207\u4E0E\u70ED\u529B\u5747\u4E3A\u4E2D\u56FD\u65F6\u95F4 CST</i>");
   }
   if (page === "storage") {
     lines.push("\u{1F5C4} <b>\u7CFB\u7EDF \xB7 \u5B58\u50A8</b>");

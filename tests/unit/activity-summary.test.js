@@ -2,11 +2,15 @@ import { describe, it, expect } from 'vitest';
 import {
   utcDayStartMs,
   utcYesterdayKey,
+  opsDayKey,
+  opsYesterdayKey,
+  opsDayStartMs,
   summarizeInboundActivity,
   shiftHourBuckets,
   peakHoursFromBuckets,
   formatHeatBars,
   formatHeatAxis,
+  formatSparkline,
   formatPeakHours,
   rankMedal,
   displayUserLabel,
@@ -24,6 +28,18 @@ describe('activity-summary', () => {
   it('utcYesterdayKey 为前一 UTC 日', () => {
     const ms = Date.UTC(2026, 6, 11, 12, 0, 0);
     expect(utcYesterdayKey(ms)).toBe('2026-07-10');
+  });
+
+  it('opsDayKey / opsDayStartMs 按 CST 日切', () => {
+    // 2026-07-11 20:00 UTC = 2026-07-12 04:00 CST → 日历日 07-12
+    const lateUtc = Date.UTC(2026, 6, 11, 20, 0, 0);
+    expect(opsDayKey(lateUtc, 8)).toBe('2026-07-12');
+    // 2026-07-11 15:00 UTC = 2026-07-11 23:00 CST → 仍是 07-11
+    const earlyUtc = Date.UTC(2026, 6, 11, 15, 0, 0);
+    expect(opsDayKey(earlyUtc, 8)).toBe('2026-07-11');
+    // CST 日界：07-12 00:00 CST = 07-11 16:00 UTC
+    expect(opsDayStartMs(lateUtc, 8)).toBe(Date.UTC(2026, 6, 11, 16, 0, 0));
+    expect(opsYesterdayKey(lateUtc, 8)).toBe('2026-07-11');
   });
 
   it('汇总总量、排行与高峰小时', () => {
@@ -72,6 +88,12 @@ describe('activity-summary', () => {
     expect(local[8]).toBe(5);
     expect(local[0]).toBe(3);
     expect(peakHoursFromBuckets(local, 1)[0]).toMatchObject({ hour: 8, count: 5 });
+  });
+
+  it('sparkline 可变长度', () => {
+    expect(formatSparkline([0, 0, 0])).toBe('···');
+    expect(formatSparkline([1, 4, 8])).toHaveLength(3);
+    expect(formatSparkline([1, 4, 8])[2]).toBe('█');
   });
 
   it('名次徽章', () => {

@@ -5,7 +5,7 @@
 /** 默认运维时区：中国（UTC+8） */
 export const OPS_TZ_OFFSET_HOURS = 8;
 
-/** 当日 UTC 0 点毫秒时间戳 */
+/** 当日 UTC 0 点毫秒时间戳（兼容/测试） */
 export function utcDayStartMs(now = Date.now()) {
   const d = new Date(Number(now) || Date.now());
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
@@ -19,6 +19,49 @@ export function utcDayKey(now = Date.now()) {
 /** 前一 UTC 日 YYYY-MM-DD */
 export function utcYesterdayKey(now = Date.now()) {
   return utcDayKey(Number(now) - 86400_000);
+}
+
+/**
+ * 运维时区日历日 YYYY-MM-DD（默认 CST）
+ * 将 now 平移 offset 小时后取 ISO 日期，即目标时区的“今天”
+ */
+export function opsDayKey(now = Date.now(), offsetHours = OPS_TZ_OFFSET_HOURS) {
+  const off = Number(offsetHours);
+  const shifted = new Date(Number(now) + off * 3600_000);
+  return shifted.toISOString().slice(0, 10);
+}
+
+/** 运维时区「昨天」日历日 */
+export function opsYesterdayKey(now = Date.now(), offsetHours = OPS_TZ_OFFSET_HOURS) {
+  return opsDayKey(Number(now) - 86400_000, offsetHours);
+}
+
+/**
+ * 运维时区当日 0 点对应的 UTC 毫秒时间戳
+ * 例：CST 2026-07-12 00:00 = 2026-07-11 16:00 UTC
+ */
+export function opsDayStartMs(now = Date.now(), offsetHours = OPS_TZ_OFFSET_HOURS) {
+  const key = opsDayKey(now, offsetHours);
+  const [y, m, d] = key.split('-').map(Number);
+  const off = Number(offsetHours);
+  return Date.UTC(y, m - 1, d) - off * 3600_000;
+}
+
+/**
+ * 可变长度迷你 sparkline（用于近 N 日）
+ * @param {number[]} values
+ */
+export function formatSparkline(values) {
+  const list = (values || []).map(n => Math.max(0, Number(n) || 0));
+  if (!list.length) return '';
+  const max = Math.max(0, ...list);
+  if (max <= 0) return '·'.repeat(list.length);
+  const blocks = '▁▂▃▄▅▆▇█';
+  return list.map((n) => {
+    if (n <= 0) return '·';
+    const level = Math.min(8, Math.max(1, Math.ceil((n / max) * 8)));
+    return blocks[level - 1];
+  }).join('');
 }
 
 /**

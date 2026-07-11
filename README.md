@@ -114,6 +114,24 @@ https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>&secret_token
 
 详细模块边界和数据流请查看[系统架构](docs/architecture.md)。
 
+## 管理命令速览
+
+群内使用（发送者须为群主/管理员、`ADMIN_IDS` 或 `OWNER_IDS`）。完整说明见[运维指南](docs/operations.md)。
+
+| 入口 | 作用 |
+|------|------|
+| `/menu` | 按钮首页（推荐） |
+| `/sysinfo` | 系统分页：概览 / 存储 / 错误 / 今日 / 活跃 |
+| `/stats` | 今日统计（CST 日切、较昨日、近 7 日趋势、热力） |
+| `/rank` | 今日活跃排行 + CST 小时热力，可点进用户面板 |
+| `/find 词` | 按 UID / 用户名 / 姓名查找 |
+| `/notes 词` | 搜索管理员备注 |
+| `/panel` `/info` | 用户话题内：快捷面板与资料 |
+| `/ban` | 封禁（二次确认）；另有 mute / close / trust 等 |
+| `/synccommands` | Owner 同步 Bot 斜杠命令菜单 |
+
+部署新 `dist/worker.single.js` 后，Owner 建议再执行一次 `/synccommands`。
+
 ## 文档导航
 
 - [完整部署](docs/deployment.md)

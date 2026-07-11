@@ -20,10 +20,19 @@ describe('临时状态与永久信任集成', () => {
   });
 
   it('OWNER_IDS 即视为管理权限，无需群管身份', async () => {
-    const telegramFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      ok: true,
-      result: { message_id: 9100, status: 'member' },
-    }), { headers: { 'content-type': 'application/json' } }));
+    const telegramFetch = vi.fn().mockImplementation(async (url) => {
+      const u = String(url);
+      if (u.includes('getChatMember')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          result: { status: 'member', user: { id: 777001 } },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        result: { message_id: 9100 },
+      }), { headers: { 'content-type': 'application/json' } });
+    });
     vi.stubGlobal('fetch', telegramFetch);
     const env = createMockEnv({
       ADMIN_IDS: '',
