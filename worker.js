@@ -36,6 +36,8 @@ import {
   formatCompareLine,
   buildAdminHomeKeyboard,
   buildBanConfirmKeyboard,
+  buildCloseConfirmKeyboard,
+  buildResetConfirmKeyboard,
   buildCleanupConfirmKeyboard,
 } from './src/admin-ui-format.js';
 import { createAdminCommandHandlers } from './src/admin-commands.js';
@@ -1917,6 +1919,7 @@ function getAdminHandlers() {
     resolveThreadIdForUser,
     getRecentSystemErrors: () => recentSystemErrors,
     handleCleanupCommand,
+    handleListWordsCommand,
     userActions: {
       ban: handleBanCommand,
       unban: handleUnbanCommand,
@@ -2536,11 +2539,29 @@ async function _handleAdminReplyInner(msg, env, ctx) {
   }
 
   // --- 话题内指令路由表 ---
-  if (text === "/close") { await handleCloseCommand(env, threadId, userId); return; }
+  // /close /reset /ban 与面板按钮一致：二次确认
+  if (text === "/close") {
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: `⚠️ <b>确认关闭对话</b> <code>${escapeHtml(String(userId))}</code>？\n将关闭 Forum Topic，用户消息不再接入（可用打开恢复）。`,
+      parse_mode: 'HTML',
+      reply_markup: buildCloseConfirmKeyboard(userId),
+    });
+    return;
+  }
   if (text === "/open") { await handleOpenCommand(env, threadId, userId); return; }
-  if (text === "/reset") { await handleResetCommand(env, threadId, userId); return; }
+  if (text === "/reset") {
+    await tgCall(env, 'sendMessage', {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: `⚠️ <b>确认重置验证</b> <code>${escapeHtml(String(userId))}</code>？\n将取消永久信任，用户下次需重新验证。`,
+      parse_mode: 'HTML',
+      reply_markup: buildResetConfirmKeyboard(userId),
+    });
+    return;
+  }
   if (text === "/trust") { await handleTrustCommand(env, threadId, userId); return; }
-  // /ban 与按钮一致：二次确认，避免误触
   if (text === "/ban") {
     await tgCall(env, 'sendMessage', {
       chat_id: env.SUPERGROUP_ID,

@@ -24,7 +24,10 @@ import {
   formatCompareLine,
   buildAdminHomeKeyboard,
   buildBanConfirmKeyboard,
+  buildCloseConfirmKeyboard,
+  buildResetConfirmKeyboard,
   buildCleanupConfirmKeyboard,
+  formatEmptyActivityHints,
 } from './admin-ui-format.js';
 import { createD1Storage } from './storage/d1-storage.js';
 import { ensureMigrations } from './storage/migrations.js';
@@ -44,6 +47,7 @@ export function createAdminCommandHandlers(deps) {
     resolveThreadIdForUser,
     getRecentSystemErrors,
     handleCleanupCommand,
+    handleListWordsCommand,
     userActions = {},
   } = deps;
 
@@ -409,6 +413,10 @@ async function buildSysinfoPageText(env, page = 'overview') {
       lines.push(formatCompareLine('🚫 封禁', today.bans, yday.bans));
       lines.push(formatCompareLine('🛡 垃圾', today.spam, yday.spam));
       lines.push(`  <i>昨 ${escapeHtml(yday.day)}：入站 ${yday.messages_in} · 验证 ${yday.verifies} · 垃圾 ${yday.spam}</i>`);
+      if (today.messages_in === 0 && yday.messages_in === 0) {
+        lines.push('');
+        lines.push(...formatEmptyActivityHints());
+      }
       lines.push('');
       lines.push('📈 <b>近 7 日入站</b> <i>CST</i>');
       lines.push(`<code>${formatSparkline(week.map(d => d.messages_in))}</code>`);
@@ -441,6 +449,10 @@ async function buildSysinfoPageText(env, page = 'overview') {
     lines.push(`入站样本 <b>${activity.summary.total}</b> · 独立用户 <b>${unique}</b>`);
     lines.push(`数据源: ${escapeHtml(activitySourceLabel(activity.source))}`);
     lines.push('');
+    if (activity.summary.total === 0 && !activity.rankingUsers.length) {
+      lines.push(...formatEmptyActivityHints());
+      lines.push('');
+    }
     lines.push(...formatHeatBlock(activity.summary.hours));
     lines.push('');
     lines.push('🏆 <b>活跃排行</b>');
@@ -899,7 +911,17 @@ async function handleAdminUiCallback(query, env, ctx) {
           });
         },
         whoami: () => handleWhoamiCommand(env, threadId, senderId),
-        listwords: () => handleListWordsCommand(env, threadId),
+        listwords: () => {
+          if (typeof handleListWordsCommand === 'function') {
+            return handleListWordsCommand(env, threadId);
+          }
+          return tgCall(env, 'sendMessage', {
+            chat_id: env.SUPERGROUP_ID,
+            message_thread_id: threadId,
+            text: '请使用命令 <code>/listwords</code>',
+            parse_mode: 'HTML',
+          });
+        },
         help: () => handleHelpCommand(env, threadId, senderId),
         menu: () => handleMenuCommand(env, threadId, senderId),
         synccommands: () => handleSyncCommandsCommand(env, threadId, senderId),
@@ -940,7 +962,7 @@ async function handleAdminUiCallback(query, env, ctx) {
         return;
       }
 
-      // 封禁二次确认
+      // 危险操作二次确认
       if (action === 'banask') {
         await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
         await tgCall(env, 'sendMessage', {
@@ -963,6 +985,50 @@ async function handleAdminUiCallback(query, env, ctx) {
         }
         return;
       }
+      if (action === 'closeask') {
+        await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
+        await tgCall(env, 'sendMessage', {
+          chat_id: env.SUPERGROUP_ID,
+          message_thread_id: tid,
+          text: `⚠️ <b>确认关闭对话</b> <code>${escapeHtml(userId)}</code>？\n将关闭 Forum Topic，用户消息不再接入（可用打开恢复）。`,
+          parse_mode: 'HTML',
+          reply_markup: buildCloseConfirmKeyboard(userId),
+        });
+        return;
+      }
+      if (action === 'closecancel') {
+        await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id, text: '已取消' });
+        if (chatId && messageId) {
+          await tgCall(env, 'editMessageText', {
+            chat_id: chatId,
+            message_id: messageId,
+            text: '已取消关闭对话。',
+          });
+        }
+        return;
+      }
+      if (action === 'resetask') {
+        await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
+        await tgCall(env, 'sendMessage', {
+          chat_id: env.SUPERGROUP_ID,
+          message_thread_id: tid,
+          text: `⚠️ <b>确认重置验证</b> <code>${escapeHtml(userId)}</code>？\n将取消永久信任，用户下次需重新验证。`,
+          parse_mode: 'HTML',
+          reply_markup: buildResetConfirmKeyboard(userId),
+        });
+        return;
+      }
+      if (action === 'resetcancel') {
+        await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id, text: '已取消' });
+        if (chatId && messageId) {
+          await tgCall(env, 'editMessageText', {
+            chat_id: chatId,
+            message_id: messageId,
+            text: '已取消重置验证。',
+          });
+        }
+        return;
+      }
       if (action === 'shownote') {
         await tgCall(env, 'answerCallbackQuery', { callback_query_id: query.id });
         await userActions.note?.(env, tid, userId, '/note');
@@ -974,9 +1040,11 @@ async function handleAdminUiCallback(query, env, ctx) {
         banok: () => userActions.ban?.(env, tid, userId),
         unban: () => userActions.unban?.(env, tid, userId),
         close: () => userActions.close?.(env, tid, userId),
+        closeok: () => userActions.close?.(env, tid, userId),
         open: () => userActions.open?.(env, tid, userId),
         trust: () => userActions.trust?.(env, tid, userId),
         reset: () => userActions.reset?.(env, tid, userId),
+        resetok: () => userActions.reset?.(env, tid, userId),
         mute: () => userActions.mute?.(env, tid, userId),
         unmute: () => userActions.unmute?.(env, tid, userId),
         info: () => userActions.info?.(env, tid, userId),
@@ -992,9 +1060,13 @@ async function handleAdminUiCallback(query, env, ctx) {
         return;
       }
       // 先应答再执行，避免 Telegram 转圈；文案不预告成功结果
+      const busyText = action === 'banok' || action === 'ban' ? '正在封禁…'
+        : action === 'closeok' || action === 'close' ? '正在关闭…'
+          : action === 'resetok' || action === 'reset' ? '正在重置…'
+            : '处理中…';
       await tgCall(env, 'answerCallbackQuery', {
         callback_query_id: query.id,
-        text: action === 'banok' || action === 'ban' ? '正在封禁…' : '处理中…',
+        text: busyText,
       });
       await fn();
       return;

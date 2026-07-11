@@ -70,12 +70,12 @@ export function buildUserActionKeyboard(userId) {
         { text: '✅ 解封', callback_data: `adm:u:unban:${id}` },
       ],
       [
-        { text: '🔒 关闭', callback_data: `adm:u:close:${id}` },
+        { text: '🔒 关闭', callback_data: `adm:u:closeask:${id}` },
         { text: '🔓 打开', callback_data: `adm:u:open:${id}` },
       ],
       [
         { text: '🌟 信任', callback_data: `adm:u:trust:${id}` },
-        { text: '🔄 重置', callback_data: `adm:u:reset:${id}` },
+        { text: '🔄 重置', callback_data: `adm:u:resetask:${id}` },
       ],
       [
         { text: '🔇 静音', callback_data: `adm:u:mute:${id}` },
@@ -138,7 +138,7 @@ export function buildUserJumpKeyboard(users, { includeMenu = true, columns = 2 }
 
 export function formatRankingBlock(rankingUsers, { withCount = true, now = Date.now() } = {}) {
   if (!rankingUsers?.length) {
-    return ['暂无今日活跃用户', '<i>有入站消息或用户发过言后会显示排行</i>'];
+    return ['暂无今日活跃用户', ...formatEmptyActivityHints()];
   }
   const lines = [];
   rankingUsers.slice(0, 10).forEach((u, i) => {
@@ -210,6 +210,26 @@ export function buildBanConfirmKeyboard(userId) {
   };
 }
 
+export function buildCloseConfirmKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [[
+      { text: '确认关闭', callback_data: `adm:u:closeok:${id}` },
+      { text: '取消', callback_data: `adm:u:closecancel:${id}` },
+    ]],
+  };
+}
+
+export function buildResetConfirmKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [[
+      { text: '确认重置', callback_data: `adm:u:resetok:${id}` },
+      { text: '取消', callback_data: `adm:u:resetcancel:${id}` },
+    ]],
+  };
+}
+
 export function buildCleanupConfirmKeyboard() {
   return {
     inline_keyboard: [[
@@ -217,4 +237,14 @@ export function buildCleanupConfirmKeyboard() {
       { text: '取消', callback_data: 'adm:nav:cleanup_cancel' },
     ]],
   };
+}
+
+/** 看板空数据引导 */
+export function formatEmptyActivityHints() {
+  return [
+    '💡 <b>还没有今日数据？</b>',
+    '• 用户私聊 Bot 并通过验证后会出现在排行',
+    '• 日切按 <b>中国时间 CST</b>，凌晨后重新累计',
+    '• 也可用 <code>/find 姓名</code> 或 <code>/notes 词</code> 定位用户',
+  ];
 }

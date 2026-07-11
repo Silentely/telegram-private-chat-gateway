@@ -2304,12 +2304,12 @@ function buildUserActionKeyboard(userId) {
         { text: "\u2705 \u89E3\u5C01", callback_data: `adm:u:unban:${id}` }
       ],
       [
-        { text: "\u{1F512} \u5173\u95ED", callback_data: `adm:u:close:${id}` },
+        { text: "\u{1F512} \u5173\u95ED", callback_data: `adm:u:closeask:${id}` },
         { text: "\u{1F513} \u6253\u5F00", callback_data: `adm:u:open:${id}` }
       ],
       [
         { text: "\u{1F31F} \u4FE1\u4EFB", callback_data: `adm:u:trust:${id}` },
-        { text: "\u{1F504} \u91CD\u7F6E", callback_data: `adm:u:reset:${id}` }
+        { text: "\u{1F504} \u91CD\u7F6E", callback_data: `adm:u:resetask:${id}` }
       ],
       [
         { text: "\u{1F507} \u9759\u97F3", callback_data: `adm:u:mute:${id}` },
@@ -2367,7 +2367,7 @@ function buildUserJumpKeyboard(users, { includeMenu = true, columns = 2 } = {}) 
 }
 function formatRankingBlock(rankingUsers, { withCount = true, now = Date.now() } = {}) {
   if (!rankingUsers?.length) {
-    return ["\u6682\u65E0\u4ECA\u65E5\u6D3B\u8DC3\u7528\u6237", "<i>\u6709\u5165\u7AD9\u6D88\u606F\u6216\u7528\u6237\u53D1\u8FC7\u8A00\u540E\u4F1A\u663E\u793A\u6392\u884C</i>"];
+    return ["\u6682\u65E0\u4ECA\u65E5\u6D3B\u8DC3\u7528\u6237", ...formatEmptyActivityHints()];
   }
   const lines = [];
   rankingUsers.slice(0, 10).forEach((u, i) => {
@@ -2429,6 +2429,24 @@ function buildBanConfirmKeyboard(userId) {
     ]]
   };
 }
+function buildCloseConfirmKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [[
+      { text: "\u786E\u8BA4\u5173\u95ED", callback_data: `adm:u:closeok:${id}` },
+      { text: "\u53D6\u6D88", callback_data: `adm:u:closecancel:${id}` }
+    ]]
+  };
+}
+function buildResetConfirmKeyboard(userId) {
+  const id = String(userId);
+  return {
+    inline_keyboard: [[
+      { text: "\u786E\u8BA4\u91CD\u7F6E", callback_data: `adm:u:resetok:${id}` },
+      { text: "\u53D6\u6D88", callback_data: `adm:u:resetcancel:${id}` }
+    ]]
+  };
+}
 function buildCleanupConfirmKeyboard() {
   return {
     inline_keyboard: [[
@@ -2436,6 +2454,14 @@ function buildCleanupConfirmKeyboard() {
       { text: "\u53D6\u6D88", callback_data: "adm:nav:cleanup_cancel" }
     ]]
   };
+}
+function formatEmptyActivityHints() {
+  return [
+    "\u{1F4A1} <b>\u8FD8\u6CA1\u6709\u4ECA\u65E5\u6570\u636E\uFF1F</b>",
+    "\u2022 \u7528\u6237\u79C1\u804A Bot \u5E76\u901A\u8FC7\u9A8C\u8BC1\u540E\u4F1A\u51FA\u73B0\u5728\u6392\u884C",
+    "\u2022 \u65E5\u5207\u6309 <b>\u4E2D\u56FD\u65F6\u95F4 CST</b>\uFF0C\u51CC\u6668\u540E\u91CD\u65B0\u7D2F\u8BA1",
+    "\u2022 \u4E5F\u53EF\u7528 <code>/find \u59D3\u540D</code> \u6216 <code>/notes \u8BCD</code> \u5B9A\u4F4D\u7528\u6237"
+  ];
 }
 
 // src/admin-commands.js
@@ -2451,6 +2477,7 @@ function createAdminCommandHandlers(deps) {
     resolveThreadIdForUser: resolveThreadIdForUser2,
     getRecentSystemErrors,
     handleCleanupCommand: handleCleanupCommand2,
+    handleListWordsCommand: handleListWordsCommand2,
     userActions = {}
   } = deps;
   const sysinfoKvCache = { ts: 0, data: null, ttlMs: 45e3 };
@@ -2776,6 +2803,10 @@ function createAdminCommandHandlers(deps) {
         lines.push(formatCompareLine("\u{1F6AB} \u5C01\u7981", today.bans, yday.bans));
         lines.push(formatCompareLine("\u{1F6E1} \u5783\u573E", today.spam, yday.spam));
         lines.push(`  <i>\u6628 ${escapeHtml(yday.day)}\uFF1A\u5165\u7AD9 ${yday.messages_in} \xB7 \u9A8C\u8BC1 ${yday.verifies} \xB7 \u5783\u573E ${yday.spam}</i>`);
+        if (today.messages_in === 0 && yday.messages_in === 0) {
+          lines.push("");
+          lines.push(...formatEmptyActivityHints());
+        }
         lines.push("");
         lines.push("\u{1F4C8} <b>\u8FD1 7 \u65E5\u5165\u7AD9</b> <i>CST</i>");
         lines.push(`<code>${formatSparkline(week.map((d) => d.messages_in))}</code>`);
@@ -2806,6 +2837,10 @@ function createAdminCommandHandlers(deps) {
       lines.push(`\u5165\u7AD9\u6837\u672C <b>${activity.summary.total}</b> \xB7 \u72EC\u7ACB\u7528\u6237 <b>${unique}</b>`);
       lines.push(`\u6570\u636E\u6E90: ${escapeHtml(activitySourceLabel(activity.source))}`);
       lines.push("");
+      if (activity.summary.total === 0 && !activity.rankingUsers.length) {
+        lines.push(...formatEmptyActivityHints());
+        lines.push("");
+      }
       lines.push(...formatHeatBlock(activity.summary.hours));
       lines.push("");
       lines.push("\u{1F3C6} <b>\u6D3B\u8DC3\u6392\u884C</b>");
@@ -3228,7 +3263,17 @@ function createAdminCommandHandlers(deps) {
             });
           },
           whoami: () => handleWhoamiCommand2(env, threadId, senderId),
-          listwords: () => handleListWordsCommand(env, threadId),
+          listwords: () => {
+            if (typeof handleListWordsCommand2 === "function") {
+              return handleListWordsCommand2(env, threadId);
+            }
+            return tgCall2(env, "sendMessage", {
+              chat_id: env.SUPERGROUP_ID,
+              message_thread_id: threadId,
+              text: "\u8BF7\u4F7F\u7528\u547D\u4EE4 <code>/listwords</code>",
+              parse_mode: "HTML"
+            });
+          },
           help: () => handleHelpCommand2(env, threadId, senderId),
           menu: () => handleMenuCommand2(env, threadId, senderId),
           synccommands: () => handleSyncCommandsCommand2(env, threadId, senderId)
@@ -3289,6 +3334,52 @@ function createAdminCommandHandlers(deps) {
           }
           return;
         }
+        if (action === "closeask") {
+          await tgCall2(env, "answerCallbackQuery", { callback_query_id: query.id });
+          await tgCall2(env, "sendMessage", {
+            chat_id: env.SUPERGROUP_ID,
+            message_thread_id: tid,
+            text: `\u26A0\uFE0F <b>\u786E\u8BA4\u5173\u95ED\u5BF9\u8BDD</b> <code>${escapeHtml(userId)}</code>\uFF1F
+\u5C06\u5173\u95ED Forum Topic\uFF0C\u7528\u6237\u6D88\u606F\u4E0D\u518D\u63A5\u5165\uFF08\u53EF\u7528\u6253\u5F00\u6062\u590D\uFF09\u3002`,
+            parse_mode: "HTML",
+            reply_markup: buildCloseConfirmKeyboard(userId)
+          });
+          return;
+        }
+        if (action === "closecancel") {
+          await tgCall2(env, "answerCallbackQuery", { callback_query_id: query.id, text: "\u5DF2\u53D6\u6D88" });
+          if (chatId && messageId) {
+            await tgCall2(env, "editMessageText", {
+              chat_id: chatId,
+              message_id: messageId,
+              text: "\u5DF2\u53D6\u6D88\u5173\u95ED\u5BF9\u8BDD\u3002"
+            });
+          }
+          return;
+        }
+        if (action === "resetask") {
+          await tgCall2(env, "answerCallbackQuery", { callback_query_id: query.id });
+          await tgCall2(env, "sendMessage", {
+            chat_id: env.SUPERGROUP_ID,
+            message_thread_id: tid,
+            text: `\u26A0\uFE0F <b>\u786E\u8BA4\u91CD\u7F6E\u9A8C\u8BC1</b> <code>${escapeHtml(userId)}</code>\uFF1F
+\u5C06\u53D6\u6D88\u6C38\u4E45\u4FE1\u4EFB\uFF0C\u7528\u6237\u4E0B\u6B21\u9700\u91CD\u65B0\u9A8C\u8BC1\u3002`,
+            parse_mode: "HTML",
+            reply_markup: buildResetConfirmKeyboard(userId)
+          });
+          return;
+        }
+        if (action === "resetcancel") {
+          await tgCall2(env, "answerCallbackQuery", { callback_query_id: query.id, text: "\u5DF2\u53D6\u6D88" });
+          if (chatId && messageId) {
+            await tgCall2(env, "editMessageText", {
+              chat_id: chatId,
+              message_id: messageId,
+              text: "\u5DF2\u53D6\u6D88\u91CD\u7F6E\u9A8C\u8BC1\u3002"
+            });
+          }
+          return;
+        }
         if (action === "shownote") {
           await tgCall2(env, "answerCallbackQuery", { callback_query_id: query.id });
           await userActions.note?.(env, tid, userId, "/note");
@@ -3299,9 +3390,11 @@ function createAdminCommandHandlers(deps) {
           banok: () => userActions.ban?.(env, tid, userId),
           unban: () => userActions.unban?.(env, tid, userId),
           close: () => userActions.close?.(env, tid, userId),
+          closeok: () => userActions.close?.(env, tid, userId),
           open: () => userActions.open?.(env, tid, userId),
           trust: () => userActions.trust?.(env, tid, userId),
           reset: () => userActions.reset?.(env, tid, userId),
+          resetok: () => userActions.reset?.(env, tid, userId),
           mute: () => userActions.mute?.(env, tid, userId),
           unmute: () => userActions.unmute?.(env, tid, userId),
           info: () => userActions.info?.(env, tid, userId),
@@ -3316,9 +3409,10 @@ function createAdminCommandHandlers(deps) {
           });
           return;
         }
+        const busyText = action === "banok" || action === "ban" ? "\u6B63\u5728\u5C01\u7981\u2026" : action === "closeok" || action === "close" ? "\u6B63\u5728\u5173\u95ED\u2026" : action === "resetok" || action === "reset" ? "\u6B63\u5728\u91CD\u7F6E\u2026" : "\u5904\u7406\u4E2D\u2026";
         await tgCall2(env, "answerCallbackQuery", {
           callback_query_id: query.id,
-          text: action === "banok" || action === "ban" ? "\u6B63\u5728\u5C01\u7981\u2026" : "\u5904\u7406\u4E2D\u2026"
+          text: busyText
         });
         await fn();
         return;
@@ -4836,6 +4930,7 @@ function getAdminHandlers() {
     resolveThreadIdForUser,
     getRecentSystemErrors: () => recentSystemErrors,
     handleCleanupCommand,
+    handleListWordsCommand,
     userActions: {
       ban: handleBanCommand,
       unban: handleUnbanCommand,
@@ -5049,7 +5144,7 @@ async function handleDelWordCommand(env, threadId, text, senderId) {
   await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `\u2705 \u5DF2\u5220\u9664\u5C4F\u853D\u8BCD\u300C${word}\u300D
 \u5F53\u524D\u52A8\u6001\u8BCD\u5E93\u5171 ${kvWords.length} \u4E2A\u8BCD`, parse_mode: "Markdown" });
 }
-async function handleListWordsCommand2(env, threadId) {
+async function handleListWordsCommand(env, threadId) {
   const allWords = await getBlockedWords(env, true);
   let kvWords = [];
   try {
@@ -5361,7 +5456,7 @@ async function _handleAdminReplyInner(msg, env, ctx) {
     return;
   }
   if (text === "/listwords") {
-    await handleListWordsCommand2(env, threadId);
+    await handleListWordsCommand(env, threadId);
     return;
   }
   let userId = null;
@@ -5406,7 +5501,14 @@ async function _handleAdminReplyInner(msg, env, ctx) {
     return;
   }
   if (text === "/close") {
-    await handleCloseCommand(env, threadId, userId);
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: `\u26A0\uFE0F <b>\u786E\u8BA4\u5173\u95ED\u5BF9\u8BDD</b> <code>${escapeHtml(String(userId))}</code>\uFF1F
+\u5C06\u5173\u95ED Forum Topic\uFF0C\u7528\u6237\u6D88\u606F\u4E0D\u518D\u63A5\u5165\uFF08\u53EF\u7528\u6253\u5F00\u6062\u590D\uFF09\u3002`,
+      parse_mode: "HTML",
+      reply_markup: buildCloseConfirmKeyboard(userId)
+    });
     return;
   }
   if (text === "/open") {
@@ -5414,7 +5516,14 @@ async function _handleAdminReplyInner(msg, env, ctx) {
     return;
   }
   if (text === "/reset") {
-    await handleResetCommand(env, threadId, userId);
+    await tgCall(env, "sendMessage", {
+      chat_id: env.SUPERGROUP_ID,
+      message_thread_id: threadId,
+      text: `\u26A0\uFE0F <b>\u786E\u8BA4\u91CD\u7F6E\u9A8C\u8BC1</b> <code>${escapeHtml(String(userId))}</code>\uFF1F
+\u5C06\u53D6\u6D88\u6C38\u4E45\u4FE1\u4EFB\uFF0C\u7528\u6237\u4E0B\u6B21\u9700\u91CD\u65B0\u9A8C\u8BC1\u3002`,
+      parse_mode: "HTML",
+      reply_markup: buildResetConfirmKeyboard(userId)
+    });
     return;
   }
   if (text === "/trust") {

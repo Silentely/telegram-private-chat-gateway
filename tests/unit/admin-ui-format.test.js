@@ -7,6 +7,9 @@ import {
   formatHeatBlock,
   escapeHtml,
   buildBanConfirmKeyboard,
+  buildCloseConfirmKeyboard,
+  buildResetConfirmKeyboard,
+  formatEmptyActivityHints,
 } from '../../src/admin-ui-format.js';
 
 describe('admin-ui-format', () => {
@@ -57,5 +60,23 @@ describe('admin-ui-format', () => {
     const flat = buildBanConfirmKeyboard('99').inline_keyboard.flat().map(b => b.callback_data);
     expect(flat).toContain('adm:u:banok:99');
     expect(flat).toContain('adm:u:bancancel:99');
+  });
+
+  it('关闭/重置确认键盘与危险操作入口', () => {
+    expect(buildCloseConfirmKeyboard('1').inline_keyboard.flat().map(b => b.callback_data))
+      .toEqual(expect.arrayContaining(['adm:u:closeok:1', 'adm:u:closecancel:1']));
+    expect(buildResetConfirmKeyboard('2').inline_keyboard.flat().map(b => b.callback_data))
+      .toEqual(expect.arrayContaining(['adm:u:resetok:2', 'adm:u:resetcancel:2']));
+    const kb = buildUserActionKeyboard('3');
+    const data = kb.inline_keyboard.flat().map(b => b.callback_data);
+    expect(data).toContain('adm:u:closeask:3');
+    expect(data).toContain('adm:u:resetask:3');
+    expect(data).toContain('adm:u:banask:3');
+  });
+
+  it('空活跃引导提示', () => {
+    const hints = formatEmptyActivityHints().join('\n');
+    expect(hints).toMatch(/CST/);
+    expect(hints).toMatch(/find/);
   });
 });
