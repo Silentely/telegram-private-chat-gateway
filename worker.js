@@ -2900,12 +2900,8 @@ async function handleCallbackQuery(query, env, ctx) {
       });
       // 在题目消息上追加提示，避免用户不知道还能继续选
       try {
-        const base = VERIFY_COPY.quizChallenge(escapeHtml(state.options?.[state.answerIndex]
-          ? (query.message?.text || '').split('\n\n')[1] || '请重试'
-          : '请重试'));
-        // 优先用当前消息正文；若无则仅 toast
         const prev = String(query.message?.text || '');
-        if (prev && !prev.includes('回答不正确')) {
+        if (prev && !prev.includes('回答不正确') && query.message?.message_id) {
           const buttons = (state.options || []).map((opt, idx) => ({
             text: opt,
             callback_data: `verify:${verifyId}:${idx}`

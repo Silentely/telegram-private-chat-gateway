@@ -1086,6 +1086,18 @@ async function handleAdminUiCallback(query, env, ctx) {
         text: busyText,
       });
       await fn();
+      // 状态变更后刷一次面板，方便管理员立刻看到最新状态
+      const refreshPanel = [
+        'banok', 'ban', 'unban',
+        'closeok', 'close', 'open',
+        'mute', 'unmute',
+        'trust', 'resetok', 'reset',
+      ].includes(action);
+      if (refreshPanel && typeof userActions.panel === 'function') {
+        try {
+          await userActions.panel(env, tid, userId);
+        } catch { /* 面板刷新失败不影响主操作 */ }
+      }
       return;
     }
 

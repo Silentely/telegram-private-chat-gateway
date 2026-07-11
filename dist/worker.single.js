@@ -3440,6 +3440,25 @@ function createAdminCommandHandlers(deps) {
           text: busyText
         });
         await fn();
+        const refreshPanel = [
+          "banok",
+          "ban",
+          "unban",
+          "closeok",
+          "close",
+          "open",
+          "mute",
+          "unmute",
+          "trust",
+          "resetok",
+          "reset"
+        ].includes(action);
+        if (refreshPanel && typeof userActions.panel === "function") {
+          try {
+            await userActions.panel(env, tid, userId);
+          } catch {
+          }
+        }
         return;
       }
       await tgCall2(env, "answerCallbackQuery", {
@@ -5873,9 +5892,8 @@ async function handleCallbackQuery(query, env, ctx) {
         show_alert: true
       });
       try {
-        const base = VERIFY_COPY.quizChallenge(escapeHtml(state.options?.[state.answerIndex] ? (query.message?.text || "").split("\n\n")[1] || "\u8BF7\u91CD\u8BD5" : "\u8BF7\u91CD\u8BD5"));
         const prev = String(query.message?.text || "");
-        if (prev && !prev.includes("\u56DE\u7B54\u4E0D\u6B63\u786E")) {
+        if (prev && !prev.includes("\u56DE\u7B54\u4E0D\u6B63\u786E") && query.message?.message_id) {
           const buttons = (state.options || []).map((opt, idx) => ({
             text: opt,
             callback_data: `verify:${verifyId}:${idx}`
