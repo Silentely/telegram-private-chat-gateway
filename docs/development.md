@@ -27,7 +27,9 @@ npm install
 │   ├── admin-service.js         # 角色授权、资料卡和规则服务（v1 资料卡）
 │   ├── admin-ui-format.js       # 管理 UI 键盘与展示纯函数
 │   ├── admin-commands.js        # 管理命令编排（sysinfo/stats/rank/notes/adm 回调）
-│   ├── activity-summary.js      # CST 日切、热力、sparkline 纯函数
+│   ├── activity-summary.js      # CST 日切、热力、sparkline、峰值日纯函数
+│   ├── verify-copy.js           # 人机验证用户侧文案常量
+│   ├── user-copy.js             # 限流/封禁静音/拦截与管理告警文案常量
 │   ├── conversation-service.js  # Topic、双向消息和资料同步
 │   ├── message-policy.js        # 内容策略和规则校验
 │   ├── telegram-client.js       # Telegram API 客户端
@@ -59,7 +61,7 @@ npm run dev
 npm run test:unit
 ```
 
-覆盖纯函数、配置、日志、Telegram Client、管理员权限、策略规则、KV 短期状态和资料卡行为。
+覆盖纯函数（含 `activity-summary`、`admin-ui-format`、`verify-copy`、`user-copy`）、配置、日志、Telegram Client、管理员权限、策略规则、KV 短期状态和资料卡行为。
 
 ### 集成测试
 
@@ -75,6 +77,7 @@ npm run test:integration
 - Topic 并发创建
 - 双向消息映射
 - 管理员资料卡和规则操作
+- 管理命令 handlers（menu / stats 等，Mock Telegram）
 - Scheduled 保留期清理
 
 ### 全量测试
@@ -159,11 +162,15 @@ node --check dist/worker.single.js
 
 - `src/app.js` 不承载 Telegram 业务逻辑。
 - `src/conversation-service.js` 通过 storage 和 telegram 接口访问外部状态。
-- `src/admin-service.js` 负责角色授权和审计，不绕过权限直接写 D1。
+- `src/admin-service.js` 负责角色授权和审计（`v1:*`），不绕过权限直接写 D1。
+- `src/admin-commands.js` 通过注入的 `tgCall` / storage / `userActions` 编排群管理 UI（`adm:*`），不处理私聊验证主路径。
+- `src/admin-ui-format.js`、`activity-summary.js`、`verify-copy.js`、`user-copy.js` 保持无 IO 纯函数/常量。
 - `src/message-policy.js` 保持纯策略计算和输入校验。
 - D1 SQL 集中在 `src/storage/d1-storage.js`，数据值使用 `.bind()`。
 - KV 短期状态集中在 `src/storage/kv-ephemeral-store.js`。
+- 日统计 KV 键 `stats:YYYY-MM-DD` 的日期为 **CST（UTC+8）** 日历日。
 - 日志通过 `src/logger.js` 脱敏，不直接输出完整 Update。
+- 不要将 `docs/superpowers/` 提交进 Git（已在 `.gitignore`）。
 
 ## 发布前命令
 

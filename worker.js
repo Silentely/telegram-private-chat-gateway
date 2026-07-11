@@ -3062,14 +3062,15 @@ async function forwardPendingMessages(state, userId, query, env, ctx) {
     if (forwardedCount > 0) {
       await tgCall(env, "sendMessage", {
         chat_id: userId,
-        text: `📩 刚才的 ${forwardedCount} 条消息已帮您送达。`
+        text: USER_COPY.pendingDelivered(forwardedCount),
+        parse_mode: 'HTML',
       });
     }
   } catch (e) {
     Logger.error('pending_message_forward_failed', e, { userId });
     await tgCall(env, "sendMessage", {
       chat_id: userId,
-      text: "⚠️ 自动发送失败，请重新发送您的消息。"
+      text: '⚠️ 自动送达失败，请重新发送您的消息。',
     });
   }
 }

@@ -12,9 +12,17 @@ flowchart TB
 
     WORKER --> CONV[src/conversation-service.js]
     WORKER --> ADMIN[src/admin-service.js]
+    WORKER --> ADMCMD[src/admin-commands.js]
+    WORKER --> ADMFMT[src/admin-ui-format.js]
+    WORKER --> ACT[src/activity-summary.js]
     WORKER --> POLICY[src/message-policy.js]
     WORKER --> CLIENT[src/telegram-client.js]
+    WORKER --> UCOPY[src/user-copy.js]
+    WORKER --> VCOPY[src/verify-copy.js]
 
+    ADMCMD --> ADMFMT
+    ADMCMD --> ACT
+    ADMCMD --> D1
     CONV --> D1[src/storage/d1-storage.js]
     ADMIN --> D1
     POLICY --> D1
@@ -33,11 +41,16 @@ flowchart TB
 
 | 模块 | 职责 |
 |------|------|
-| `worker.js` | Telegram 业务编排、命令处理、验证流程、媒体组和 Worker 导出 |
+| `worker.js` | Telegram 业务编排、验证与会话转发、用户状态命令、媒体组；通过 `createAdminCommandHandlers` 接入管理看板 |
 | `src/app.js` | 健康检查、HTTP 请求限制、Webhook Secret 校验、D1 migrations、Scheduled 入口 |
 | `src/update-router.js` | Telegram Update ID 提取、幂等声明、完成和可重试失败状态 |
 | `src/conversation-service.js` | `createConversationService()`：用户初始化、Topic 创建锁、双向消息、消息映射和资料卡同步 |
-| `src/admin-service.js` | `createAdminService()`：角色授权、私聊管理员入口、资料卡 Callback、规则写入和审计 |
+| `src/admin-service.js` | `createAdminService()`：角色授权、私聊管理员入口、资料卡 Callback（`v1:*`）、规则写入和审计 |
+| `src/admin-commands.js` | `createAdminCommandHandlers()`：群内 `/menu` `/sysinfo` `/stats` `/rank` `/find` `/notes` 与 `adm:*` 回调编排 |
+| `src/admin-ui-format.js` | 管理键盘、排行/热力/空状态等展示纯函数（无 IO） |
+| `src/activity-summary.js` | CST 日切、小时热力、7 日 sparkline、峰值日等统计纯函数 |
+| `src/verify-copy.js` | 人机验证用户侧文案常量（Turnstile / 题库 / 过期 / 答错 / 成功） |
+| `src/user-copy.js` | 用户拦截/限流/封禁静音与管理侧 spam/转发失败等文案常量 |
 | `src/message-policy.js` | `evaluateMessagePolicy()`：内容类型识别、规则输入校验、规则匹配和策略结果生成 |
 | `src/telegram-client.js` | Telegram API Base 白名单、超时、重试、错误分类和退避 |
 | `src/logger.js` | 结构化 JSON 日志和递归脱敏 |
@@ -46,6 +59,11 @@ flowchart TB
 | `src/storage/kv-ephemeral-store.js` | `createEphemeralStore()`：验证、管理员输入状态、Topic 健康和管理员缓存等短期状态 |
 | `src/storage/kv-storage.js` | KV 用户记录兼容读取和短期辅助写入 |
 | `src/storage/migrations.js` | D1 Schema 和索引的幂等创建 |
+
+### 管理 UI 双轨
+
+- **群管理快捷 UI（`adm:*`）**：`admin-commands.js` + `admin-ui-format.js`，面向超级群内 `/menu`、`/panel` 按钮与分页看板；权限为群主/管理员、`ADMIN_IDS` 或 `OWNER_IDS`。
+- **资料卡服务（`v1:*`）**：`admin-service.js`，角色 Owner / Operator / Rules Manager 与 D1 审计。
 
 ## HTTP 入口
 

@@ -6092,14 +6092,15 @@ async function forwardPendingMessages(state, userId, query, env, ctx) {
     if (forwardedCount > 0) {
       await tgCall(env, "sendMessage", {
         chat_id: userId,
-        text: `\u{1F4E9} \u521A\u624D\u7684 ${forwardedCount} \u6761\u6D88\u606F\u5DF2\u5E2E\u60A8\u9001\u8FBE\u3002`
+        text: USER_COPY.pendingDelivered(forwardedCount),
+        parse_mode: "HTML"
       });
     }
   } catch (e) {
     Logger.error("pending_message_forward_failed", e, { userId });
     await tgCall(env, "sendMessage", {
       chat_id: userId,
-      text: "\u26A0\uFE0F \u81EA\u52A8\u53D1\u9001\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u53D1\u9001\u60A8\u7684\u6D88\u606F\u3002"
+      text: "\u26A0\uFE0F \u81EA\u52A8\u9001\u8FBE\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u53D1\u9001\u60A8\u7684\u6D88\u606F\u3002"
     });
   }
 }

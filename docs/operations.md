@@ -137,15 +137,22 @@ KV 保存短期状态和动态屏蔽词。重要部署前记录：
 
 ### 管理命令速查（群内）
 
+权限：群主/管理员，或 `ADMIN_IDS`，或 **`OWNER_IDS`（视为管理权限）**。
+
 | 场景 | 命令 / 入口 |
 |------|-------------|
 | 按钮首页 | `/menu` |
 | 系统分页 | `/sysinfo`（概览/存储/错误/今日/活跃） |
-| 今日与对比 | `/stats`（**CST 日切**、较昨日、近 7 日 sparkline、热力） |
+| 今日与对比 | `/stats`（**CST 日切**、较昨日、近 7 日 sparkline + **峰值日**、热力） |
 | 活跃排行 | `/rank`（CST 日切 + 热力 + Top 用户，可点进面板） |
 | 查找 | `/find 词` · `/notes 关键词` |
-| 用户操作 | 话题内 `/panel` `/info` `/note` `/ban`(确认) `/mute` 等 |
+| 用户操作 | 话题内 `/panel` `/info` `/note`；`/ban` `/close` `/reset` **需二次确认**；`/mute` `/open` `/trust` 等 |
+| 操作后面板 | 封禁/关闭/静音/信任/重置等回调执行后会自动再发最新 `/panel` |
+| 词库 | `/listwords` `/addword` `/delword`（HTML 展示） |
+| 清理 | `/cleanup`（二次确认） |
 | 同步斜杠菜单 | Owner `/synccommands` |
+
+日统计与活跃窗口按 **中国时间 CST（UTC+8）** 切日；小时热力桶内部存 UTC 小时，展示时平移到 CST。
 
 部署新版本后请粘贴最新 `dist/worker.single.js`；命令列表变更后由 Owner 再跑一次 `/synccommands`。
 

@@ -122,13 +122,15 @@ https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>&secret_token
 |------|------|
 | `/menu` | 按钮首页（推荐） |
 | `/sysinfo` | 系统分页：概览 / 存储 / 错误 / 今日 / 活跃 |
-| `/stats` | 今日统计（CST 日切、较昨日、近 7 日趋势、热力） |
+| `/stats` | 今日统计（CST 日切、较昨日、近 7 日趋势与峰值日、热力） |
 | `/rank` | 今日活跃排行 + CST 小时热力，可点进用户面板 |
 | `/find 词` | 按 UID / 用户名 / 姓名查找 |
 | `/notes 词` | 搜索管理员备注 |
 | `/panel` `/info` | 用户话题内：快捷面板与资料 |
-| `/ban` | 封禁（二次确认）；另有 mute / close / trust 等 |
+| `/ban` `/close` `/reset` | 需二次确认；另有 mute / open / trust 等 |
 | `/synccommands` | Owner 同步 Bot 斜杠命令菜单 |
+
+日切与热力展示使用 **中国时间 CST（UTC+8）**。私聊用户仅 `/start` `/help`（及验证流程）。
 
 部署新 `dist/worker.single.js` 后，Owner 建议再执行一次 `/synccommands`。
 

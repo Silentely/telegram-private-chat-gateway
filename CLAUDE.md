@@ -27,10 +27,14 @@ flowchart LR
     ROUTER --> WORKER[worker.js]
     WORKER --> CONV[src/conversation-service.js]
     WORKER --> ADMIN[src/admin-service.js]
+    WORKER --> ADMCMD[src/admin-commands.js]
     WORKER --> POLICY[src/message-policy.js]
     WORKER --> CLIENT[src/telegram-client.js]
+    ADMCMD --> ADMFMT[src/admin-ui-format.js]
+    ADMCMD --> ACT[src/activity-summary.js]
     CONV --> D1[(D1)]
     ADMIN --> D1
+    ADMCMD --> D1
     WORKER --> KV[(KV)]
 ```
 
@@ -38,18 +42,23 @@ flowchart LR
 
 | 路径 | 职责 |
 |------|------|
-| `worker.js` | Telegram 业务编排、验证、命令、媒体组和 Worker 导出 |
+| `worker.js` | Telegram 业务编排、验证、会话转发、用户状态命令、媒体组；接入管理看板 handlers |
 | `src/app.js` | HTTP 安全入口、Webhook 校验、migrations 和 Scheduled 入口 |
 | `src/update-router.js` | Telegram Update 幂等声明、完成和重试状态 |
 | `src/conversation-service.js` | 用户、Topic、双向消息、资料卡和消息映射 |
-| `src/admin-service.js` | 角色权限、资料卡操作、规则和审计 |
+| `src/admin-service.js` | 角色权限、资料卡操作（`v1:*`）、规则和审计 |
+| `src/admin-commands.js` | 群管理命令与 `adm:*` 回调编排（menu/sysinfo/stats/rank/find/notes） |
+| `src/admin-ui-format.js` | 管理键盘与展示纯函数 |
+| `src/activity-summary.js` | CST 日切、热力、sparkline、峰值日 |
+| `src/verify-copy.js` | 人机验证用户侧文案 |
+| `src/user-copy.js` | 用户拦截/限流与管理告警文案 |
 | `src/message-policy.js` | 内容分类、规则校验和策略评估 |
 | `src/telegram-client.js` | Telegram API 超时、重试和错误分类 |
 | `src/logger.js` | 结构化日志和递归脱敏 |
 | `src/maintenance-service.js` | D1 保留期清理 |
 | `src/storage/` | D1、KV、短期状态和 Schema migrations |
 | `tests/unit/` | 纯函数和服务单元测试 |
-| `tests/integration/` | HTTP、D1、会话、幂等和维护集成测试 |
+| `tests/integration/` | HTTP、D1、会话、幂等、管理命令和维护集成测试 |
 
 ## 开发命令
 
@@ -83,10 +92,14 @@ npm run sync-docs
 
 - 保持 `src/app.js` 与 Telegram 业务逻辑解耦。
 - 会话和管理员服务通过注入的 storage、telegram 和 logger 接口访问外部状态。
+- 群管理 UI（`adm:*`）走 `admin-commands` + `admin-ui-format`；资料卡 `v1:*` 走 `admin-service`，勿混权限模型。
+- 用户可见文案：验证用 `verify-copy.js`，其余拦截/限流用 `user-copy.js`。
+- 日统计 KV `stats:YYYY-MM-DD` 使用 **CST（UTC+8）** 日历日。
 - 用户状态使用 D1 原子部分更新，避免读取整行后覆盖并发状态。
 - D1 数据值使用 `.bind()`；动态列名必须来自内部白名单。
 - Callback、规则类型、动作和 API Base URL 使用白名单。
 - 日志不得包含完整 Telegram Update、消息正文或真实凭据。
+- 不要将 `docs/superpowers/` 提交进 Git。
 - 新行为和 Bug 修复先写失败测试，再实现最小修复。
 - 功能、配置、部署或安全行为变化时同步 README、专题文档和 Changelog。
 
@@ -119,85 +132,106 @@ npm run sync-docs
 
 | 函数 | 行号 | 职责 |
 |------|------|------|
-| `containsLink` | L23 | 检测消息文本中是否包含 URL/链接 |
-| `buildSpamCheckText` | L37 | 构建反垃圾检测文本：消息正文 + 发送者资料 |
-| `detectSpamKeywords` | L54 | 检测消息是否包含垃圾关键词 |
-| `computeMessageHash` | L66 | 计算消息内容的简单哈希（用于重复检测） |
-| `normalizeTgDescription` | L76 | 标准化 Telegram API 描述字符串 |
-| `isTopicMissingOrDeleted` | L83 | 判断话题是否不存在或已被删除 |
-| `isTestMessageInvalid` | L97 | 判断探测消息是否因内容为空而失败 |
-| `withMessageThreadId` | L106 | 为请求 body 添加 message_thread_id 字段 |
-| `parseSpamKeywords` | L114 | 将 SPAM_KEYWORDS 环境变量解析为关键词数组 |
-| `generateVerifyCode` | L125 | 生成安全的验证 code（16 字节十六进制） |
-| `setBoundedCache` | L181 | — |
-| `getBlockedWords` | L224 | 获取完整屏蔽词列表 = 硬编码 + KV 动态词库（合并去重） |
-| `ephemeralStore` | L257 | — |
-| `getVerificationState` | L261 | — |
-| `getStoredRules` | L277 | — |
-| `evaluateLegacyPolicy` | L287 | — |
-| `createLegacyConversationService` | L313 | — |
-| `parseIdAllowlist` | L323 | — |
-| `createLegacyAdminService` | L330 | — |
-| `setPersistentTrust` | L340 | — |
-| `saveLegacyMessageLink` | L350 | — |
-| `secureRandomInt` | L369 | 加密安全的随机数生成 |
-| `secureRandomId` | L376 | — |
-| `safeGetJSON` | L384 | 安全的 JSON 获取 |
-| `getOrCreateUserTopicRec` | L401 | — |
-| `probeForumThread` | L470 | — |
-| `resetUserVerificationAndRequireReverify` | L526 | — |
-| `parseAdminIdAllowlist` | L552 | — |
-| `isAdminUser` | L557 | — |
-| `getAllKeys` | L593 | 获取所有 KV keys（处理分页） |
-| `shuffleArray` | L607 | Fisher-Yates 洗牌算法 |
-| `checkRateLimit` | L617 | 速率限制检查 |
-| `verifyTurnstileToken` | L630 | 调用 Cloudflare Turnstile API 验证 token |
-| `getSpamKeywords` | L659 | 加载/解析垃圾关键词列表 |
-| `detectRepeatMessage` | L677 | 检测用户是否在短时间内重复发送相同内容 |
-| `pruneMessageHashCache` | L703 | 定期清理过期的 messageHashCache 条目（防止内存无限增长） |
-| `spamCheck` | L719 | 综合垃圾检测（关键词 + 链接 + 重复） |
-| `notifyAdmin` | L771 | 用于关键异常（转发失败、KV 异常等）向管理员发送即时通知 |
-| `updateSpamStats` | L793 | 异步更新 spam 统计计数（在 waitUntil 中调用，不阻塞主响应） |
-| `handleSpamMessage` | L816 | 处理垃圾消息（通知管理员或静默丢弃） |
-| `escapeHtml` | L852 | HTML 转义函数（防止 XSS：验证页面模板中的用户输入注入） |
-| `showStatus` | L902 | — |
-| `onTurnstileSuccess` | L907 | — |
-| `onTurnstileError` | L952 | — |
-| `handlePrivateMessage` | L1251 | ---------------- 核心业务逻辑 ---------------- |
-| `forwardToTopic` | L1335 | 职责：前置检查 → 获取/创建话题 → 健康检查 → 执行转发 |
-| `checkThreadHealth` | L1412 | 话题健康检查 — 双层缓存（内存 + KV）+ 探测 |
-| `executeMessageForward` | L1471 | 执行消息转发 — forwardMessage → copyMessage 降级 + 重定向检测 |
-| `handleForwardRedirect` | L1515 | 处理转发重定向 — 删除误投消息 + 触发重建 |
-| `handleForwardFailure` | L1543 | 处理转发失败 — 话题丢失检测 + copyMessage 降级 + 通知管理员 |
-| `removeCommandBotSuffix` | L1589 | 例如：/listwords@callcosr_bot -> /listwords |
-| `handleAdminReply` | L1595 | — |
-| `handleHelpCommand` | L1608 | --- 管理员命令处理函数 --- |
-| `handleAddWordCommand` | L1637 | *关于：** |
-| `handleDelWordCommand` | L1664 | — |
-| `handleListWordsCommand` | L1698 | — |
-| `handleCloseCommand` | L1719 | — |
-| `handleOpenCommand` | L1730 | — |
-| `handleResetCommand` | L1741 | — |
-| `handleTrustCommand` | L1746 | — |
-| `handleBanCommand` | L1752 | — |
-| `handleUnbanCommand` | L1757 | — |
-| `handleInfoCommand` | L1762 | — |
-| `_handleAdminReplyInner` | L1776 | 职责：权限检查 → 全局命令路由 → 用户反查 → 话题内指令路由 → 消息转发 |
-| `sendVerificationChallenge` | L1881 | ---------------- 验证模块 (纯本地) ---------------- |
-| `_sendVerificationChallengeInner` | L1896 | — |
-| `sendTurnstileChallenge` | L1954 | Turnstile 验证路径 — 发送验证按钮链接 |
-| `sendLocalQuizChallenge` | L2014 | 本地题库验证路径 — 发送选择题 |
-| `handleCallbackQuery` | L2068 | — |
-| `forwardPendingMessages` | L2191 | 验证通过后转发待处理消息 — 并行转发 + 去重 + 通知用户 |
-| `handleCleanupCommand` | L2272 | - 需要批量重置这些用户的状态 |
-| `createTopic` | L2432 | 为话题建立 thread->user 映射，避免管理员命令时全量 KV 反查 |
-| `updateThreadStatus` | L2446 | 更新话题状态 |
-| `buildTopicTitle` | L2483 | 改进的话题标题构建（清理特殊字符） |
-| `tgCall` | L2511 | 改进的 Telegram API 调用（添加超时和 HTTPS 强制） |
-| `handleMediaGroup` | L2538 | — |
-| `extractMedia` | L2559 | 改进的媒体提取（支持更多类型，不修改原数组） |
-| `flushExpiredMediaGroups` | L2611 | 实现媒体组清理 |
-| `delaySend` | L2634 | 改进媒体组延迟发送 |
+| `containsLink` | L54 | 检测消息文本中是否包含 URL/链接 |
+| `buildSpamCheckText` | L68 | 构建反垃圾检测文本：消息正文 + 发送者资料 |
+| `detectSpamKeywords` | L85 | 检测消息是否包含垃圾关键词 |
+| `computeMessageHash` | L97 | 计算消息内容的简单哈希（用于重复检测） |
+| `normalizeTgDescription` | L107 | 标准化 Telegram API 描述字符串 |
+| `isTopicMissingOrDeleted` | L114 | 判断话题是否不存在或已被删除 |
+| `isTestMessageInvalid` | L128 | 判断探测消息是否因内容为空而失败 |
+| `withMessageThreadId` | L137 | 为请求 body 添加 message_thread_id 字段 |
+| `parseSpamKeywords` | L145 | 将 SPAM_KEYWORDS 环境变量解析为关键词数组 |
+| `generateVerifyCode` | L156 | 生成安全的验证 code（16 字节十六进制） |
+| `setBoundedCache` | L215 | — |
+| `getBlockedWords` | L258 | 获取完整屏蔽词列表 = 硬编码 + KV 动态词库（合并去重） |
+| `recordSystemError` | L295 | — |
+| `ephemeralStore` | L334 | — |
+| `getVerificationState` | L338 | — |
+| `getStoredRules` | L354 | — |
+| `evaluateLegacyPolicy` | L364 | — |
+| `createLegacyConversationService` | L390 | — |
+| `parseIdAllowlist` | L401 | — |
+| `idAllowlistHas` | L408 | — |
+| `createLegacyAdminService` | L412 | — |
+| `setPersistentTrust` | L422 | — |
+| `saveLegacyMessageLink` | L432 | — |
+| `secureRandomInt` | L451 | 加密安全的随机数生成 |
+| `secureRandomId` | L458 | — |
+| `safeGetJSON` | L466 | 安全的 JSON 获取 |
+| `isSparseTelegramFrom` | L486 | 判断 Telegram from 是否缺少可用于话题标题的资料字段。 |
+| `saveUserProfileSnapshot` | L496 | 缓存用户资料，供 Turnstile 验证回放等缺少 from 的路径建话题时使用。 |
+| `resolveUserFromForTopic` | L514 | 修复 Turnstile 验证通过后 fakeMsg 仅含 id 导致标题变成「User」的问题。 |
+| `getOrCreateUserTopicRec` | L578 | — |
+| `probeForumThread` | L665 | — |
+| `resetUserVerificationAndRequireReverify` | L721 | — |
+| `parseAdminIdAllowlist` | L747 | — |
+| `isAdminUser` | L752 | — |
+| `getAllKeys` | L791 | 获取所有 KV keys（处理分页） |
+| `shuffleArray` | L805 | Fisher-Yates 洗牌算法 |
+| `checkRateLimit` | L815 | 速率限制检查 |
+| `verifyTurnstileToken` | L828 | 调用 Cloudflare Turnstile API 验证 token |
+| `getSpamKeywords` | L857 | 加载/解析垃圾关键词列表 |
+| `detectRepeatMessage` | L875 | 检测用户是否在短时间内重复发送相同内容 |
+| `pruneMessageHashCache` | L901 | 定期清理过期的 messageHashCache 条目（防止内存无限增长） |
+| `spamCheck` | L917 | 综合垃圾检测（关键词 + 链接 + 重复） |
+| `notifyAdmin` | L969 | 用于关键异常（转发失败、KV 异常等）向管理员发送即时通知 |
+| `updateSpamStats` | L991 | 异步更新 spam 统计计数（在 waitUntil 中调用，不阻塞主响应） |
+| `handleSpamMessage` | L1014 | 处理垃圾消息（通知管理员或静默丢弃） |
+| `showStatus` | L1092 | — |
+| `onTurnstileSuccess` | L1097 | — |
+| `onTurnstileError` | L1142 | — |
+| `handlePrivateMessage` | L1496 | ---------------- 核心业务逻辑 ---------------- |
+| `forwardToTopic` | L1616 | 职责：前置检查 → 获取/创建话题 → 健康检查 → 执行转发 |
+| `checkThreadHealth` | L1712 | 话题健康检查 — 双层缓存（内存 + KV）+ 探测 |
+| `executeMessageForward` | L1771 | 执行消息转发 — forwardMessage → copyMessage 降级 + 重定向检测 |
+| `handleForwardRedirect` | L1815 | 处理转发重定向 — 删除误投消息 + 触发重建 |
+| `handleForwardFailure` | L1843 | 处理转发失败 — 话题丢失检测 + copyMessage 降级 + 通知管理员 |
+| `removeCommandBotSuffix` | L1896 | 例如：/listwords@callcosr_bot -> /listwords |
+| `handleAdminReply` | L1902 | — |
+| `isOwnerUser` | L1915 | --- 管理员命令处理函数 --- |
+| `getAdminHandlers` | L1922 | — |
+| `bumpDailyStat` | L1953 | — |
+| `handleHelpCommand` | L1956 | — |
+| `handleMenuCommand` | L1959 | — |
+| `handleSysinfoCommand` | L1962 | — |
+| `handleStatsCommand` | L1965 | — |
+| `handleRankCommand` | L1968 | — |
+| `handleNotesCommand` | L1971 | — |
+| `handleWhoamiCommand` | L1974 | — |
+| `handleFindCommand` | L1977 | — |
+| `handleSyncCommandsCommand` | L1980 | — |
+| `handleAdminUiCallback` | L1983 | — |
+| `resolveThreadIdForUser` | L1988 | — |
+| `handlePanelCommand` | L2000 | — |
+| `handleMuteCommand` | L2041 | — |
+| `handleUnmuteCommand` | L2058 | — |
+| `handleNoteCommand` | L2076 | — |
+| `handleAddWordCommand` | L2108 | — |
+| `handleDelWordCommand` | L2150 | — |
+| `handleListWordsCommand` | L2204 | — |
+| `handleCloseCommand` | L2246 | — |
+| `handleOpenCommand` | L2275 | — |
+| `handleResetCommand` | L2304 | — |
+| `handleTrustCommand` | L2314 | — |
+| `handleBanCommand` | L2325 | — |
+| `handleUnbanCommand` | L2362 | — |
+| `handleInfoCommand` | L2390 | — |
+| `_handleAdminReplyInner` | L2479 | 职责：权限检查 → 全局命令路由 → 用户反查 → 话题内指令路由 → 消息转发 |
+| `sendVerificationChallenge` | L2680 | ---------------- 验证模块 (纯本地) ---------------- |
+| `_sendVerificationChallengeInner` | L2696 | — |
+| `sendTurnstileChallenge` | L2754 | Turnstile 验证路径 — 发送验证按钮链接 |
+| `sendLocalQuizChallenge` | L2814 | 本地题库验证路径 — 发送选择题 |
+| `handleCallbackQuery` | L2868 | — |
+| `forwardPendingMessages` | L3013 | 验证通过后转发待处理消息 — 并行转发 + 去重 + 通知用户 |
+| `handleCleanupCommand` | L3096 | - 需要批量重置这些用户的状态 |
+| `createTopic` | L3256 | 为话题建立 thread->user 映射，避免管理员命令时全量 KV 反查 |
+| `updateThreadStatus` | L3270 | 更新话题状态 |
+| `buildTopicTitle` | L3309 | 资料缺失时勿在调用方传入仅 { id } 的 from（会退化为 "User"）；应先 resolveUserFromForTopic。 |
+| `tgCall` | L3339 | 改进的 Telegram API 调用（添加超时和 HTTPS 强制） |
+| `handleMediaGroup` | L3366 | — |
+| `extractMedia` | L3387 | 改进的媒体提取（支持更多类型，不修改原数组） |
+| `flushExpiredMediaGroups` | L3439 | 实现媒体组清理 |
+| `delaySend` | L3462 | 改进媒体组延迟发送 |
 
 ### src/utils.js 纯函数
 
@@ -265,11 +299,17 @@ npm run sync-docs
 
 | 键名模式 |
 |----------|
+| `ban_notice:{id}` |
 | `banned:{id}` |
 | `blocked_words_kv` |
 | `chal:{id}` |
+| `mute_notice:{id}` |
+| `muted:{id}` |
 | `needs_verify:{id}` |
+| `note:{id}` |
+| `profile:{id}` |
 | `retry:{id}` |
+| `sys:recent_errors` |
 | `thread:{id}` |
 | `turnstile_code:{id}` |
 | `turnstile_msg:{id}` |
