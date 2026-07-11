@@ -19,6 +19,39 @@ describe('临时状态与永久信任集成', () => {
     vi.unstubAllGlobals();
   });
 
+  it('OWNER_IDS 即视为管理权限，无需群管身份', async () => {
+    const telegramFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      result: { message_id: 9100, status: 'member' },
+    }), { headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', telegramFetch);
+    const env = createMockEnv({
+      ADMIN_IDS: '',
+      OWNER_IDS: '777001',
+    });
+
+    const response = await worker.fetch(createWebhookRequest({
+      update_id: 8100,
+      message: {
+        message_id: 600,
+        message_thread_id: 1,
+        text: '/whoami',
+        chat: { id: Number(env.SUPERGROUP_ID), type: 'supergroup' },
+        from: { id: 777001 },
+      },
+    }), env, { waitUntil() {} });
+
+    expect(response.status).toBe(200);
+    // 至少应发出 whoami 回复，而不是权限拒绝
+    const bodies = telegramFetch.mock.calls
+      .map(([, init]) => {
+        try { return JSON.parse(init?.body || '{}'); } catch { return {}; }
+      })
+      .filter(b => typeof b.text === 'string');
+    expect(bodies.some(b => b.text.includes('Whoami') && b.text.includes('777001'))).toBe(true);
+    expect(bodies.some(b => b.text.includes('无管理权限'))).toBe(false);
+  });
+
   it('管理员永久信任只写入 D1，不写 verified KV', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       ok: true,
