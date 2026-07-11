@@ -16,7 +16,7 @@
     "sync-docs": "node scripts/sync-claude-md.js"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^2.1.9",
-    "vitest": "^2.1.8"
+    "@vitest/coverage-v8": "^4.1.10",
+    "vitest": "^4.1.10"
   }
 }
