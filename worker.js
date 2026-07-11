@@ -1431,14 +1431,15 @@ const legacyApp = {
             text: [
               '👋 <b>私聊网关</b>',
               '',
-              '直接发送文字/图片/文件即可联系管理员。',
-              '首次使用可能需要完成人机验证。',
+              '直接发送文字 / 图片 / 文件即可联系管理员。',
+              '首次使用可能需要完成人机验证（按钮或网页）。',
+              '若被静音或封禁，会收到单独通知。',
               '',
               '常用：',
               '• /start — 开始或重新触发验证',
               '• /help — 显示本说明',
               '',
-              '管理指令仅在超级群话题内由管理员使用。',
+              '<i>管理指令仅在超级群话题内由管理员使用。</i>',
             ].join('\n'),
             parse_mode: 'HTML',
           });
@@ -1997,10 +1998,13 @@ async function handlePanelCommand(env, threadId, userId) {
     '────────────────',
     `👤 ${name} · ${un}`,
     `UID <code>${userId}</code>`,
-    `状态  封禁:${ban ? '是' : '否'} · 静音:${muted ? '是' : '否'} · 关闭:${rec?.closed ? '是' : '否'}`,
-    note ? `📝 ${escapeHtml(String(note).slice(0, 80))}` : '📝 无备注',
+    `状态  封禁:${ban ? '🚫 是' : '否'} · 静音:${muted ? '🔇 是' : '否'} · 关闭:${rec?.closed ? '🔒 是' : '否'}`,
+    note
+      ? `📝 ${escapeHtml(String(note).slice(0, 80))}${String(note).length > 80 ? '…' : ''}`
+      : '📝 无备注 · <code>/note 内容</code> 添加',
     '',
-    '👇 点按钮操作 · 封禁需二次确认',
+    '👇 点按钮操作',
+    '<i>封禁 / 关闭 / 重置需二次确认</i>',
   ].join('\n');
   await tgCall(env, 'sendMessage', {
     chat_id: env.SUPERGROUP_ID,

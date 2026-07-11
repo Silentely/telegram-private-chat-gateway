@@ -11,6 +11,8 @@ import {
   formatHeatBars,
   formatHeatAxis,
   formatSparkline,
+  pickPeakDays,
+  formatPeakDays,
   formatPeakHours,
   rankMedal,
   displayUserLabel,
@@ -94,6 +96,21 @@ describe('activity-summary', () => {
     expect(formatSparkline([0, 0, 0])).toBe('···');
     expect(formatSparkline([1, 4, 8])).toHaveLength(3);
     expect(formatSparkline([1, 4, 8])[2]).toBe('█');
+  });
+
+  it('峰值日选取与文案', () => {
+    const peaks = pickPeakDays([
+      { day: '2026-07-08', messages_in: 3 },
+      { day: '2026-07-09', messages_in: 12 },
+      { day: '2026-07-10', messages_in: 0 },
+      { day: '2026-07-11', messages_in: 9 },
+    ], 2);
+    expect(peaks).toEqual([
+      { day: '2026-07-09', messages_in: 12 },
+      { day: '2026-07-11', messages_in: 9 },
+    ]);
+    expect(formatPeakDays(peaks)).toBe('07-09×12 · 07-11×9');
+    expect(formatPeakDays([])).toBe('暂无');
   });
 
   it('名次徽章', () => {

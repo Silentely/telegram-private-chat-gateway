@@ -65,6 +65,35 @@ export function formatSparkline(values) {
 }
 
 /**
+ * 近 N 日序列中取峰值日
+ * @param {Array<{day:string, messages_in?:number}>} series
+ * @param {number} [topN=1]
+ * @returns {Array<{day:string, messages_in:number}>}
+ */
+export function pickPeakDays(series, topN = 1) {
+  const n = Math.min(Math.max(Number(topN) || 1, 1), 7);
+  return [...(series || [])]
+    .map(d => ({
+      day: String(d?.day || ''),
+      messages_in: Math.max(0, Number(d?.messages_in) || 0),
+    }))
+    .filter(d => d.day && d.messages_in > 0)
+    .sort((a, b) => b.messages_in - a.messages_in || a.day.localeCompare(b.day))
+    .slice(0, n);
+}
+
+/**
+ * 峰值日文案：07-09×12 · 07-08×9
+ * @param {Array<{day:string, messages_in:number}>} peaks
+ */
+export function formatPeakDays(peaks) {
+  if (!peaks?.length) return '暂无';
+  return peaks
+    .map(p => `${String(p.day).slice(5)}×${p.messages_in}`)
+    .join(' · ');
+}
+
+/**
  * 汇总入站消息行 → 总量 / 小时桶 / 用户排行
  * @param {Array<{userId:string, createdAt:number}>} rows
  * @param {{topN?:number}} [opts]

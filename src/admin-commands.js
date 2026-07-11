@@ -10,6 +10,8 @@ import {
   opsDayStartMs,
   summarizeInboundActivity,
   formatSparkline,
+  pickPeakDays,
+  formatPeakDays,
   activitySourceLabel,
 } from './activity-summary.js';
 import {
@@ -401,11 +403,23 @@ async function buildSysinfoPageText(env, page = 'overview') {
       lines.push('D1 未绑定，无法显示会话统计');
     }
 
+    // 概览页：轻量告警入口
+    if (page === 'overview') {
+      try {
+        const recentErrs = await collectRecentErrors(env);
+        if (recentErrs.length) {
+          lines.push('');
+          lines.push(`⚠️ 最近错误 <b>${recentErrs.length}</b> 条 · 点下方「错误」分页查看`);
+        }
+      } catch { /* ignore */ }
+    }
+
     if (page === 'stats') {
       activity = await loadTodayActivity(env);
       const today = activity.today;
       const yday = await getDailyStats(env, opsYesterdayKey());
       const week = await getRecentDailySeries(env, 7);
+      const peaks = pickPeakDays(week, 2);
       lines.push('');
       lines.push(`📅 <b>今日</b> <code>${escapeHtml(today.day)}</code> <i>CST UTC+${OPS_TZ_OFFSET_HOURS}</i>`);
       lines.push(formatCompareLine('💬 入站', today.messages_in, yday.messages_in));
@@ -424,6 +438,7 @@ async function buildSysinfoPageText(env, page = 'overview') {
         const mmdd = d.day.slice(5);
         return `${mmdd}:${d.messages_in}`;
       }).join(' · '));
+      lines.push(`峰值日 ${escapeHtml(formatPeakDays(peaks))}`);
       lines.push('');
       lines.push(...formatHeatBlock(activity.summary.hours));
       if (activity.rankingUsers.length) {
@@ -501,7 +516,7 @@ async function buildSysinfoPageText(env, page = 'overview') {
     const top = await collectRecentErrors(env);
     if (!top.length) {
       lines.push('✨ 暂无错误记录');
-      lines.push('<i>冷启动后内存缓冲会清空</i>');
+      lines.push('<i>冷启动后内存缓冲会清空；持续 5xx 时请查 /health 与 CF 日志</i>');
     } else {
       for (const err of top) {
         const act = escapeHtml(err.action || '?');
@@ -510,6 +525,8 @@ async function buildSysinfoPageText(env, page = 'overview') {
         lines.push(`🔴 <b>${act}</b>${uid}`);
         lines.push(`   ${formatRelativeTime(err.ts)} · ${msg}`);
       }
+      lines.push('');
+      lines.push('<i>建议：对照 Webhook 是否 5xx、D1/KV 绑定是否正常</i>');
     }
   }
 

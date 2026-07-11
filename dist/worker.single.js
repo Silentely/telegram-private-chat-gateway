@@ -2162,6 +2162,17 @@ function formatSparkline(values) {
     return blocks[level - 1];
   }).join("");
 }
+function pickPeakDays(series, topN = 1) {
+  const n = Math.min(Math.max(Number(topN) || 1, 1), 7);
+  return [...series || []].map((d) => ({
+    day: String(d?.day || ""),
+    messages_in: Math.max(0, Number(d?.messages_in) || 0)
+  })).filter((d) => d.day && d.messages_in > 0).sort((a, b) => b.messages_in - a.messages_in || a.day.localeCompare(b.day)).slice(0, n);
+}
+function formatPeakDays(peaks) {
+  if (!peaks?.length) return "\u6682\u65E0";
+  return peaks.map((p) => `${String(p.day).slice(5)}\xD7${p.messages_in}`).join(" \xB7 ");
+}
 function summarizeInboundActivity(rows, opts = {}) {
   const topN = Math.min(Math.max(Number(opts.topN) || 10, 1), 30);
   const hours = Array.from({ length: 24 }, () => 0);
@@ -2791,11 +2802,22 @@ function createAdminCommandHandlers(deps) {
       } else {
         lines.push("D1 \u672A\u7ED1\u5B9A\uFF0C\u65E0\u6CD5\u663E\u793A\u4F1A\u8BDD\u7EDF\u8BA1");
       }
+      if (page === "overview") {
+        try {
+          const recentErrs = await collectRecentErrors(env);
+          if (recentErrs.length) {
+            lines.push("");
+            lines.push(`\u26A0\uFE0F \u6700\u8FD1\u9519\u8BEF <b>${recentErrs.length}</b> \u6761 \xB7 \u70B9\u4E0B\u65B9\u300C\u9519\u8BEF\u300D\u5206\u9875\u67E5\u770B`);
+          }
+        } catch {
+        }
+      }
       if (page === "stats") {
         activity = await loadTodayActivity(env);
         const today = activity.today;
         const yday = await getDailyStats(env, opsYesterdayKey());
         const week = await getRecentDailySeries(env, 7);
+        const peaks = pickPeakDays(week, 2);
         lines.push("");
         lines.push(`\u{1F4C5} <b>\u4ECA\u65E5</b> <code>${escapeHtml(today.day)}</code> <i>CST UTC+${OPS_TZ_OFFSET_HOURS}</i>`);
         lines.push(formatCompareLine("\u{1F4AC} \u5165\u7AD9", today.messages_in, yday.messages_in));
@@ -2814,6 +2836,7 @@ function createAdminCommandHandlers(deps) {
           const mmdd = d.day.slice(5);
           return `${mmdd}:${d.messages_in}`;
         }).join(" \xB7 "));
+        lines.push(`\u5CF0\u503C\u65E5 ${escapeHtml(formatPeakDays(peaks))}`);
         lines.push("");
         lines.push(...formatHeatBlock(activity.summary.hours));
         if (activity.rankingUsers.length) {
@@ -2887,7 +2910,7 @@ function createAdminCommandHandlers(deps) {
       const top = await collectRecentErrors(env);
       if (!top.length) {
         lines.push("\u2728 \u6682\u65E0\u9519\u8BEF\u8BB0\u5F55");
-        lines.push("<i>\u51B7\u542F\u52A8\u540E\u5185\u5B58\u7F13\u51B2\u4F1A\u6E05\u7A7A</i>");
+        lines.push("<i>\u51B7\u542F\u52A8\u540E\u5185\u5B58\u7F13\u51B2\u4F1A\u6E05\u7A7A\uFF1B\u6301\u7EED 5xx \u65F6\u8BF7\u67E5 /health \u4E0E CF \u65E5\u5FD7</i>");
       } else {
         for (const err of top) {
           const act = escapeHtml(err.action || "?");
@@ -2896,6 +2919,8 @@ function createAdminCommandHandlers(deps) {
           lines.push(`\u{1F534} <b>${act}</b>${uid}`);
           lines.push(`   ${formatRelativeTime(err.ts)} \xB7 ${msg}`);
         }
+        lines.push("");
+        lines.push("<i>\u5EFA\u8BAE\uFF1A\u5BF9\u7167 Webhook \u662F\u5426 5xx\u3001D1/KV \u7ED1\u5B9A\u662F\u5426\u6B63\u5E38</i>");
       }
     }
     lines.push("");
@@ -4538,14 +4563,15 @@ var legacyApp = {
             text: [
               "\u{1F44B} <b>\u79C1\u804A\u7F51\u5173</b>",
               "",
-              "\u76F4\u63A5\u53D1\u9001\u6587\u5B57/\u56FE\u7247/\u6587\u4EF6\u5373\u53EF\u8054\u7CFB\u7BA1\u7406\u5458\u3002",
-              "\u9996\u6B21\u4F7F\u7528\u53EF\u80FD\u9700\u8981\u5B8C\u6210\u4EBA\u673A\u9A8C\u8BC1\u3002",
+              "\u76F4\u63A5\u53D1\u9001\u6587\u5B57 / \u56FE\u7247 / \u6587\u4EF6\u5373\u53EF\u8054\u7CFB\u7BA1\u7406\u5458\u3002",
+              "\u9996\u6B21\u4F7F\u7528\u53EF\u80FD\u9700\u8981\u5B8C\u6210\u4EBA\u673A\u9A8C\u8BC1\uFF08\u6309\u94AE\u6216\u7F51\u9875\uFF09\u3002",
+              "\u82E5\u88AB\u9759\u97F3\u6216\u5C01\u7981\uFF0C\u4F1A\u6536\u5230\u5355\u72EC\u901A\u77E5\u3002",
               "",
               "\u5E38\u7528\uFF1A",
               "\u2022 /start \u2014 \u5F00\u59CB\u6216\u91CD\u65B0\u89E6\u53D1\u9A8C\u8BC1",
               "\u2022 /help \u2014 \u663E\u793A\u672C\u8BF4\u660E",
               "",
-              "\u7BA1\u7406\u6307\u4EE4\u4EC5\u5728\u8D85\u7EA7\u7FA4\u8BDD\u9898\u5185\u7531\u7BA1\u7406\u5458\u4F7F\u7528\u3002"
+              "<i>\u7BA1\u7406\u6307\u4EE4\u4EC5\u5728\u8D85\u7EA7\u7FA4\u8BDD\u9898\u5185\u7531\u7BA1\u7406\u5458\u4F7F\u7528\u3002</i>"
             ].join("\n"),
             parse_mode: "HTML"
           });
@@ -5005,10 +5031,11 @@ async function handlePanelCommand(env, threadId, userId) {
     "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
     `\u{1F464} ${name} \xB7 ${un}`,
     `UID <code>${userId}</code>`,
-    `\u72B6\u6001  \u5C01\u7981:${ban ? "\u662F" : "\u5426"} \xB7 \u9759\u97F3:${muted ? "\u662F" : "\u5426"} \xB7 \u5173\u95ED:${rec?.closed ? "\u662F" : "\u5426"}`,
-    note ? `\u{1F4DD} ${escapeHtml(String(note).slice(0, 80))}` : "\u{1F4DD} \u65E0\u5907\u6CE8",
+    `\u72B6\u6001  \u5C01\u7981:${ban ? "\u{1F6AB} \u662F" : "\u5426"} \xB7 \u9759\u97F3:${muted ? "\u{1F507} \u662F" : "\u5426"} \xB7 \u5173\u95ED:${rec?.closed ? "\u{1F512} \u662F" : "\u5426"}`,
+    note ? `\u{1F4DD} ${escapeHtml(String(note).slice(0, 80))}${String(note).length > 80 ? "\u2026" : ""}` : "\u{1F4DD} \u65E0\u5907\u6CE8 \xB7 <code>/note \u5185\u5BB9</code> \u6DFB\u52A0",
     "",
-    "\u{1F447} \u70B9\u6309\u94AE\u64CD\u4F5C \xB7 \u5C01\u7981\u9700\u4E8C\u6B21\u786E\u8BA4"
+    "\u{1F447} \u70B9\u6309\u94AE\u64CD\u4F5C",
+    "<i>\u5C01\u7981 / \u5173\u95ED / \u91CD\u7F6E\u9700\u4E8C\u6B21\u786E\u8BA4</i>"
   ].join("\n");
   await tgCall(env, "sendMessage", {
     chat_id: env.SUPERGROUP_ID,

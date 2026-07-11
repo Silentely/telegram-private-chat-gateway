@@ -9,6 +9,8 @@
 - 管理 UI 展示与命令编排拆至 `src/admin-ui-format.js`、`src/admin-commands.js`（行为不变，便于后续迭代与单测）。
 - 关闭对话、重置验证与封禁一致支持二次确认（面板按钮与 `/close` `/reset` 文本命令）。
 - 今日活跃/统计空数据增加可操作引导；修复管理菜单「屏蔽词」回调未注入 listwords 的问题。
+- `/stats` 近 7 日标注峰值日；概览页提示最近错误条数；错误页补充排查提示。
+- 用户面板状态与备注提示更清晰；私聊 `/help` 补充静音/封禁通知说明。
 - 新增 `/panel` 用户快捷按钮面板；`/info` 附带操作按钮与备注/静音/最近消息。
 - `/sysinfo` 分页：概览 / 存储 / 错误 / 今日统计 / 活跃，带刷新按钮。
 - 新增 `/menu` 管理首页按钮；`/stats` `/rank` `/notes` `/whoami` `/find` `/note` `/mute` `/unmute`；Owner `/synccommands`。
