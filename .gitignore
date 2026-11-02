@@ -17,6 +17,7 @@ vendor/
 Thumbs.db
 
 # CCG 开发工具
+skills/
 .omc/
 .omx/
 .ace-tool/
