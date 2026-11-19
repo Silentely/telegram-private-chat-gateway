@@ -65,7 +65,7 @@ flowchart LR
 ```bash
 git clone https://github.com/Silentely/telegram-private-chat-gateway.git
 cd telegram-private-chat-gateway
-npm install
+pnpm install
 ```
 
 ### 2. 确认单文件产物
@@ -73,7 +73,7 @@ npm install
 仓库已包含 `dist/worker.single.js`。修改源码后可手动重建（提交时 pre-commit 也会自动构建）：
 
 ```bash
-npm run build:single
+pnpm run build:single
 ```
 
 ### 3. 粘贴到 Cloudflare Worker

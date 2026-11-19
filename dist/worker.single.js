@@ -5504,7 +5504,7 @@ var CONFIG = {
   RETRY_COUNT_TTL_SECONDS: 3600
   // 话题健康重试计数有效期：超过即视为从未失败，避免历史失败永久生效
 };
-var GATEWAY_VERSION = "1.3.9";
+var GATEWAY_VERSION = "1.4.0";
 var TOPIC_TITLE_PLACEHOLDER = "User";
 var HOURLY_NOTICE_TTL_SECONDS = 3600;
 var threadHealthCache = /* @__PURE__ */ new Map();

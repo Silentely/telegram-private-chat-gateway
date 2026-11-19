@@ -69,18 +69,18 @@ flowchart LR
 ## 开发命令
 
 ```bash
-npm install
-npm run dev
-npm run test:unit
-npm run test:integration
-npm test
-npm run test:coverage
-npm run build:single
-npm run sync-docs
+pnpm install
+pnpm run dev
+pnpm run test:unit
+pnpm run test:integration
+pnpm test
+pnpm run test:coverage
+pnpm run build:single
+pnpm run sync-docs
 ```
 
 生产发布：粘贴 `dist/worker.single.js` 到 Cloudflare Dashboard，Bindings/变量/Cron 在控制台配置（见 `docs/deployment.md`）。  
-提交时若变更了业务源码（`worker.js` / `src/` / `package.json` / `package-lock.json`），pre-commit 会自动递增版本号（patch 逢 10 进位到 minor，minor 逢 10 进位到 major，同步 `worker.js` / `package.json` / `package-lock.json`）并重建 dist（`npm install` 后 hooks 生效）。
+提交时若变更了业务源码（`worker.js` / `src/` / `package.json` / `pnpm-lock.yaml`），pre-commit 会自动递增版本号（patch 逢 10 进位到 minor，minor 逢 10 进位到 major，同步 `worker.js` / `package.json`）并重建 dist（`pnpm install` 后 hooks 生效）。
 
 项目没有独立 lint 或 TypeScript typecheck。提交前还应对全部 JavaScript 文件运行 `node --check`，并运行 `git diff --check`。
 
@@ -125,7 +125,7 @@ npm run sync-docs
 以下区块由 `scripts/sync-claude-md.js` 维护。修改 `worker.js`、`src/utils.js` 或 CONFIG 后运行：
 
 ```bash
-npm run sync-docs
+pnpm run sync-docs
 ```
 
 <!-- AUTO-GENERATED START: functions -->

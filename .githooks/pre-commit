@@ -1,23 +1,23 @@
 #!/usr/bin/env sh
-# 提交时若变更了业务源码（worker.js / src/ / package.json / package-lock.json），
+# 提交时若变更了业务源码（worker.js / src/ / package.json / pnpm-lock.yaml），
 # 自动递增版本号（patch 逢 10 进位到 minor，minor 逢 10 进位到 major，
-# 同步 worker.js 的 GATEWAY_VERSION 与 package.json / package-lock.json 的 version），
+# 同步 worker.js 的 GATEWAY_VERSION 与 package.json 的 version），
 # 然后重建单文件 Worker 产物，保证 dist 与源码一致。
 set -e
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-if git diff --cached --name-only --diff-filter=ACMR | grep -Eq '^(worker\.js|src/|package\.json|package-lock\.json)'; then
-  # 递增版本号；三处版本不一致时脚本退出非零，阻止提交
+if git diff --cached --name-only --diff-filter=ACMR | grep -Eq '^(worker\.js|src/|package\.json|pnpm-lock\.yaml)'; then
+  # 递增版本号；两处版本不一致时脚本退出非零，阻止提交
   echo "[pre-commit] bumping version ..."
   NEXT_VERSION="$(node scripts/bump-version.js)"
   echo "[pre-commit] version -> v${NEXT_VERSION}"
-  git add worker.js package.json package-lock.json
+  git add worker.js package.json pnpm-lock.yaml
 
   # 版本号写回 worker.js 必然命中业务源码，重建 dist 并 stage
   echo "[pre-commit] building dist/worker.single.js ..."
-  npm run build:single
+  pnpm run build:single
   git add dist/worker.single.js
   echo "[pre-commit] dist/worker.single.js staged"
 fi

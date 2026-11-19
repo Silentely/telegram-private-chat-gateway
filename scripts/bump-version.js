@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
  * 版本号递增脚本：patch 逢 10 进位到 minor，minor 逢 10 进位到 major。
- * 同步更新 worker.js 的 GATEWAY_VERSION 与 package.json / package-lock.json 的 version。
+ * 同步更新 worker.js 的 GATEWAY_VERSION 与 package.json 的 version。
  *
  * 直接运行（由 .githooks/pre-commit 调用）：node scripts/bump-version.js
  * 成功时向 stdout 输出新版本号（如 1.0.1），失败时退出非零并打印错误。
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -37,7 +37,7 @@ export function nextVersion(version) {
 }
 
 /**
- * 读取并校验 worker.js / package.json 的版本号，一致则递增并写回三处文件。
+ * 读取并校验 worker.js / package.json 的版本号，一致则递增并写回两处文件。
  * 版本不一致时报错退出，避免静默覆盖手动改动。
  * @param {string} root 仓库根目录
  * @returns {string} 递增后的版本号
@@ -45,7 +45,6 @@ export function nextVersion(version) {
 export function bumpFiles(root) {
   const workerPath = join(root, 'worker.js');
   const pkgPath = join(root, 'package.json');
-  const lockPath = join(root, 'package-lock.json');
 
   const workerSrc = readFileSync(workerPath, 'utf8');
   const pkgSrc = readFileSync(pkgPath, 'utf8');
@@ -71,16 +70,6 @@ export function bumpFiles(root) {
     workerSrc.replace(/GATEWAY_VERSION\s*=\s*'[\d.]+'/, `GATEWAY_VERSION = '${next}'`),
   );
   writeFileSync(pkgPath, pkgSrc.replace(/"version"\s*:\s*"[\d.]+"/, `"version": "${next}"`));
-
-  // package-lock.json 根包版本同步：仅匹配 name 相同的两处（顶层 + packages[""]），不误伤依赖
-  if (existsSync(lockPath)) {
-    const lockSrc = readFileSync(lockPath, 'utf8');
-    const lockNext = lockSrc.replace(
-      new RegExp(`"name": "${PKG_NAME}",\\s*\\n(\\s*)"version": "[\\d.]+"`, 'g'),
-      `"name": "${PKG_NAME}",\n$1"version": "${next}"`,
-    );
-    writeFileSync(lockPath, lockNext);
-  }
 
   return next;
 }

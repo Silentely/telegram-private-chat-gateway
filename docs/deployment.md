@@ -9,7 +9,7 @@
 ## 前置条件
 
 - Cloudflare 账号
-- Node.js 20 或更高版本（`^20` / `^22` / `>=24`，用于 `npm install`、测试与打包）
+- Node.js 20 或更高版本（`^20` / `^22` / `>=24`，用于 `pnpm install`、测试与打包）
 - npm
 - Telegram Bot Token
 - 已开启 Topics 的 Telegram 超级群组
@@ -22,10 +22,10 @@
 ```bash
 git clone https://github.com/Silentely/telegram-private-chat-gateway.git
 cd telegram-private-chat-gateway
-npm install
+pnpm install
 ```
 
-`npm install` 会安装依赖，并通过 `prepare` 将 Git hooks 指向 `.githooks`（提交时自动重建 `dist/`）。
+`pnpm install` 会安装依赖，并通过 `prepare` 将 Git hooks 指向 `.githooks`（提交时自动重建 `dist/`）。
 
 仓库已包含可部署产物：
 
@@ -71,7 +71,7 @@ dist/worker.single.js
 手动打包：
 
 ```bash
-npm run build:single
+pnpm run build:single
 ```
 
 生成或更新：
@@ -80,7 +80,7 @@ npm run build:single
 dist/worker.single.js
 ```
 
-提交相关源码时，`.githooks/pre-commit` 会自动执行 `npm run build:single` 并将 `dist/worker.single.js` 加入暂存区，保证仓库中的 dist 与源码一致。
+提交相关源码时，`.githooks/pre-commit` 会自动执行 `pnpm run build:single` 并将 `dist/worker.single.js` 加入暂存区，保证仓库中的 dist 与源码一致。
 
 ---
 
@@ -96,7 +96,7 @@ dist/worker.single.js
 https://telegram-private-chat-gateway.<YOUR_SUBDOMAIN>.workers.dev
 ```
 
-之后每次更新业务代码：本地 `npm run build:single`（或 git commit 自动构建）→ 再粘贴 dist → Deploy。  
+之后每次更新业务代码：本地 `pnpm run build:single`（或 git commit 自动构建）→ 再粘贴 dist → Deploy。  
 **Bindings / Variables / Cron 一般会保留，无需每次重填。**
 
 ---
@@ -202,15 +202,15 @@ https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo
 ## 9. 发布前检查（本地）
 
 ```bash
-npm test
-npm run build:single
+pnpm test
+pnpm run build:single
 node --check dist/worker.single.js
 ```
 
 可选：
 
 ```bash
-npm run test:coverage
+pnpm run test:coverage
 ```
 
 ---
@@ -238,7 +238,7 @@ npm run test:coverage
 # 修改 worker.js / src/** 后
 git add -A
 git commit -m "说明变更"
-# pre-commit 自动: npm run build:single && git add dist/worker.single.js
+# pre-commit 自动: pnpm run build:single && git add dist/worker.single.js
 git push   # 仅备份代码；不会自动更新 Cloudflare
 ```
 

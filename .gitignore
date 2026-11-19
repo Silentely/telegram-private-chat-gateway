@@ -36,6 +36,21 @@ npm-debug.log*
 
 # 构建产物
 build/
+# dist/worker.single.js 是部署时粘贴到 Cloudflare 的发布产物，保持跟踪；
+# 其余 dist 内容（本地重新打包的临时产物）不入库。
+/dist/*
+!/dist/worker.single.js
+
+# Python / 覆盖率产物
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Playwright
+playwright-report/
+test-results/
 
 # 临时文件
 tmp/
