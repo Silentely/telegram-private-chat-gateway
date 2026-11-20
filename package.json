@@ -4,7 +4,7 @@
   "description": "部署在 Cloudflare Workers 上的 Telegram 私聊安全接入与双向会话网关",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.34.9",
+  "packageManager": "pnpm@12.21.0",
   "main": "worker.js",
   "scripts": {
     "clean": "rm -rf node_modules .mypy_cache htmlcov .coverage coverage.xml playwright-report && find dist -mindepth 1 -maxdepth 1 ! -name worker.single.js -exec rm -rf {} +",
